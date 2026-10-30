@@ -9,6 +9,8 @@ import Foundation
 /// Cold starts cost whatever the device needs (~70 ms for a C920, ~470 ms for a Studio Display).
 final class Recorder {
     var onLevel: (Float) -> Void = { _ in }
+    /// Receives the pre-roll and then every captured chunk, in order, while recording.
+    var onCapture: ([Float]) -> Void = { _ in }
     let sampleRate: Double = 16_000
 
     private let preRollSeconds = 0.3
@@ -45,6 +47,7 @@ final class Recorder {
         let warm = queue != nil
         lock.withLock {
             samples = warm ? Array(ring.suffix(Int(preRollSeconds * sampleRate))) : []
+            onCapture(samples)
             startedAt = Date()
             firstBufferLogged = warm
             capturing = true
@@ -109,6 +112,7 @@ final class Recorder {
                     log.info("first audio \(ms, privacy: .public)ms after press")
                 }
                 samples.append(contentsOf: chunk)
+                onCapture(Array(chunk))
             } else {
                 ring.append(contentsOf: chunk)
                 let limit = Int(preRollSeconds * sampleRate)

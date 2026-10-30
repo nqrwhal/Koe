@@ -19,6 +19,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp $products/Koe "$app/Contents/MacOS/"
 cp -R $products/*.bundle "$app/Contents/Resources/"  # MLX shaders, tokenizer resources
 cp Info.plist "$app/Contents/"
+cp Resources/AppIcon.icns "$app/Contents/Resources/"  # regenerate with: swift tools/make-icon.swift
 # A stable identity keeps the Accessibility grant across rebuilds; fall back to ad-hoc.
 identity=$(security find-identity -p codesigning | grep -q '"Murmur Dev"' && echo "Murmur Dev" || echo -)
 codesign --force --deep --sign "$identity" --identifier com.yufei.koe "$app"

@@ -16,6 +16,10 @@ import Tokenizers
 actor Fuser {
     private var context: ModelContext?
     private var prefixCache: [KVCache] = []
+    private var seamCache: [KVCache] = []
+    private var yesTokens: [Int] = []
+    private var noTokens: [Int] = []
+    private let seamMargin: Float = 1  // calibrated on real seams: true continuations scored +1.4 and +6.3
     private var stopTokens: Set<Int> = []
     private var canTrim = false
 
@@ -42,15 +46,30 @@ actor Fuser {
         eval(context.model(MLXArray(prefix.map(Int32.init)).reshaped([1, prefix.count]), cache: cache))
         prefixCache = cache
         canTrim = cache.allSatisfy(\.isTrimmable)
+
+        let seamQuestion = """
+            A dictation was split into two parts at a pause, and each part was transcribed separately, \
+            so part 1 may end with a period that the speaker didn't intend.
+            Does part 2 continue the same sentence as part 1? Answer yes or no.
+
+
+            """
+        yesTokens = ["yes", "Yes", "YES"].compactMap { tokenizer.convertTokenToId($0) }
+        noTokens = ["no", "No", "NO"].compactMap { tokenizer.convertTokenToId($0) }
+        let seamPrefix = tokenizer.encode(text: "<bos><|turn>user\n" + seamQuestion, addSpecialTokens: false)
+        seamCache = try context.model.newCache(parameters: nil)
+        eval(context.model(MLXArray(seamPrefix.map(Int32.init)).reshaped([1, seamPrefix.count]), cache: seamCache))
         self.context = context
-        _ = fuse("ok", "ok", draft: "ok")  // compile kernels before the first real request
+        _ = fuse("ok", "ok", draft: "ok", context: nil)  // compile kernels before the first real request
     }
 
-    /// Nil until the model has loaded. `draft` is the text the answer most likely resembles.
-    func fuse(_ a: String, _ b: String, draft: String) -> String? {
+    /// Nil until the model has loaded. `draft` is the text the answer most likely resembles;
+    /// `context` is the already-final text just before this piece of a longer dictation.
+    func fuse(_ a: String, _ b: String, draft: String, context preceding: String?) -> String? {
         guard let context else { return nil }
         let tokenizer = context.tokenizer
-        let prompt = tokenizer.encode(text: "A: \(a)\nB: \(b)<turn|>\n<|turn>model\n", addSpecialTokens: false)
+        let lead = preceding.map { "(Preceding text, already final; do not repeat it: \($0))\n" } ?? ""
+        let prompt = tokenizer.encode(text: lead + "A: \(a)\nB: \(b)<turn|>\n<|turn>model\n", addSpecialTokens: false)
         let draftSource = canTrim ? tokenizer.encode(text: draft, addSpecialTokens: false) : []
         let cache = prefixCache.map { $0.copy() }
 
@@ -71,6 +90,22 @@ actor Fuser {
         }
         return tokenizer.decode(tokenIds: output, skipSpecialTokens: true)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Whether `next` continues the same sentence as `previous`; nil until the model has loaded.
+    func continues(_ previous: String, _ next: String) -> Bool? {
+        guard let context else { return nil }
+        let end = previous.split(separator: " ").suffix(15).joined(separator: " ")
+        let start = next.split(separator: " ").prefix(10).joined(separator: " ")
+        let prompt = context.tokenizer.encode(
+            text: "End of part 1: \"…\(end)\"\nStart of part 2: \"\(start)…\"<turn|>\n<|turn>model\n",
+            addSpecialTokens: false)
+        // Gemma leans towards "yes" when unsure, so require a clear margin over "no".
+        let logits = forward(prompt, seamCache.map { $0.copy() })[0, -1]
+        let yes = yesTokens.map { logits[$0].item(Float.self) }.max() ?? 0
+        let no = noTokens.map { logits[$0].item(Float.self) }.max() ?? 0
+        log.info("seam margin \(yes - no, privacy: .public): …\(end, privacy: .private) | \(start, privacy: .private)…")
+        return yes - no > seamMargin
     }
 
     private func forward(_ tokens: [Int], _ cache: [KVCache]) -> MLXArray {

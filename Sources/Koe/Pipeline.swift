@@ -1,3 +1,4 @@
+import FluidAudio
 import Foundation
 
 /// Bark (Neural Engine) and Qwen3-ASR (GPU) transcribe in parallel. When they agree (ignoring the
@@ -18,9 +19,16 @@ final class Pipeline {
     private let qwen = QwenTranscriber()
     private let fuser = Fuser()
     private let terms = Vocabulary.load()
+    private var vad: VadManager?
 
     func loadBark(progress: @escaping @Sendable (Double) -> Void) async throws {
         try await bark.load(progress: progress)
+        vad = try? await VadManager()
+    }
+
+    /// A session that transcribes while the key is held; nil until the VAD has loaded.
+    func startLive() -> LiveTranscription? {
+        vad.map { LiveTranscription(pipeline: self, vad: $0) }
     }
 
     /// Loads Qwen, then Gemma. Failures are logged and leave the pipeline on the previous tier.
@@ -41,7 +49,7 @@ final class Pipeline {
     func warmUp() async {
         _ = try? await bark.transcribe([Float](repeating: 0, count: 16_000), sampleRate: 16_000)
         _ = await qwen.transcribe([Float](repeating: 0, count: 16_000), context: "")
-        _ = await fuser.fuse("ok", "ok", draft: "ok")
+        _ = await fuser.fuse("ok", "ok", draft: "ok", context: nil)
     }
 
     /// Called on key press: a tiny Qwen run gets the GPU clocked up while the user is still talking.
@@ -49,8 +57,14 @@ final class Pipeline {
         Task { _ = await qwen.transcribe([Float](repeating: 0, count: 8_000), context: "") }
     }
 
-    /// Expects 16 kHz mono samples.
-    func transcribe(_ samples: [Float]) async throws -> Result {
+    /// Whether `next` continues the sentence that `previous` (split off at a pause) ended with a period.
+    /// False until Gemma has loaded.
+    func continues(_ previous: String, _ next: String) async -> Bool {
+        await fuser.continues(previous, next) ?? false
+    }
+
+    /// Expects 16 kHz mono samples. `context` is the final text preceding this piece, if any.
+    func transcribe(_ samples: [Float], context preceding: String? = nil) async throws -> Result {
         let context = terms.joined(separator: ", ")
         async let barkRun = timed { try await self.bark.transcribe(samples, sampleRate: 16_000) }
         async let qwenRun = timed { await self.qwen.transcribe(samples, context: context) }
@@ -79,7 +93,8 @@ final class Pipeline {
             while end < sentences.count && sentences[end].disputed { end += 1 }
             let group = sentences[index..<end]
             let a = group.map(\.a).joined(separator: " "), b = group.map(\.b).joined(separator: " ")
-            let (fused, ms) = await timed { await self.fuser.fuse(a, b, draft: b) }
+            let previous = parts.last ?? preceding
+            let (fused, ms) = await timed { await self.fuser.fuse(a, b, draft: b, context: previous) }
             fuseMs += ms
             if let fused, !fused.isEmpty { parts.append(fused) } else { parts.append(b); fellBack = true }
             index = end

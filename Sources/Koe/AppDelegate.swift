@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recording = false
     private var pressedAt = Date()
     private var lastText: String?
+    private var live: LiveTranscription?
 
     /// Taps shorter than this are treated as accidental.
     private let minimumHold: TimeInterval = 0.25
@@ -27,7 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
-        setIcon("ellipsis")
+        setIcon(.loading)
 
         hotkey.onPress = { [unowned self] in startRecording() }
         hotkey.onRelease = { [unowned self] in finishRecording() }
@@ -51,6 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startRecording() {
         // Record even while the model is still loading; transcription waits for it.
         guard !recording else { return }
+        let session = pipeline.startLive()
+        live = session
+        recorder.onCapture = { session?.append($0) }
         do {
             try recorder.start()
         } catch {
@@ -60,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recording = true
         pressedAt = Date()
         pipeline.wakeGPU()
-        setIcon("waveform.circle.fill")
+        setIcon(.recording)
         hud.show(.listening)
     }
 
@@ -72,15 +76,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + tail) { [self] in
             let samples = recorder.stop()
             let rate = recorder.sampleRate
+            let session = live
+            live = nil
             recording = false
-            setIcon(ready ? "waveform" : "ellipsis")
+            setIcon(ready ? .idle : .loading)
             let released = Date()
 
             Task { @MainActor in
                 do {
                     try await modelLoad?.value
-                    let result = try await pipeline.transcribe(samples)
-                    let text = result.text
+                    let text: String
+                    let summary: String
+                    if let session {
+                        let outcome = try await session.finish(samples)
+                        text = outcome.text
+                        let last = outcome.segments.last
+                        summary = "\(outcome.segments.count) segments, tail \(outcome.tailMs)ms"
+                            + (last.map { ", last via \($0.route) (qwen \($0.qwenMs)ms, fuse \($0.fuseMs)ms)" } ?? "")
+                    } else {
+                        let r = try await pipeline.transcribe(samples)
+                        text = r.text
+                        summary = "whole via \(r.route) (qwen \(r.qwenMs)ms, fuse \(r.fuseMs)ms)"
+                    }
                     Recordings.save(samples, sampleRate: rate, transcript: text)
                     hud.hide()
                     guard !text.isEmpty else { return }
@@ -88,7 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     remember(text)
                     let audioSeconds = Double(samples.count) / rate
                     let pasteMs = Int(Date().timeIntervalSince(released) * 1000)
-                    log.info("\(audioSeconds, format: .fixed(precision: 1), privacy: .public)s audio → \(pasteMs, privacy: .public)ms to paste via \(result.route, privacy: .public) [\(result.choices, privacy: .public) choices] (bark \(result.barkMs, privacy: .public)ms, qwen \(result.qwenMs, privacy: .public)ms, fuse \(result.fuseMs, privacy: .public)ms)")
+                    log.info("\(audioSeconds, format: .fixed(precision: 1), privacy: .public)s audio → \(pasteMs, privacy: .public)ms to paste; \(summary, privacy: .public)")
                 } catch {
                     hud.hide()
                     log.error("transcription failed: \(error, privacy: .public)")
@@ -100,8 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelRecording() {
         guard recording else { return }
         _ = recorder.stop()
+        let session = live
+        live = nil
+        Task { await session?.stop() }
         recording = false
-        setIcon(ready ? "waveform" : "ellipsis")
+        setIcon(ready ? .idle : .loading)
         hud.hide()
     }
 
@@ -114,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self.setStatus("Downloading speech model… \(Int(fraction * 100))%") }
             }
             ready = true
-            if !recording { setIcon("waveform") }
+            if !recording { setIcon(.idle) }
             setStatus("Hold Right ⌘ to dictate")
             await pipeline.loadRest { status in
                 self.setStatus(status == "Ready" ? "Hold Right ⌘ to dictate" : "Hold Right ⌘ to dictate (\(status))")
@@ -195,7 +215,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLine.title = text
     }
 
-    private func setIcon(_ symbol: String) {
-        statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Koe")
+    private enum IconState { case loading, idle, recording }
+
+    /// The menu bar shows 声: dimmed while models load, red while recording.
+    private func setIcon(_ state: IconState) {
+        let color: NSColor = switch state {
+        case .loading: .tertiaryLabelColor
+        case .idle: .labelColor
+        case .recording: .systemRed
+        }
+        statusItem.button?.attributedTitle = NSAttributedString(string: "声", attributes: [
+            .font: NSFont(name: "HiraMinProN-W6", size: 15) ?? .menuBarFont(ofSize: 15),
+            .foregroundColor: color,
+        ])
+        statusItem.button?.setAccessibilityLabel("Koe")
     }
 }
