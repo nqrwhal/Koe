@@ -17,11 +17,19 @@ Koe is built for people who dictate technical text: it gets `OIDC`, `kubectl`, `
 
 ## Install
 
-Download the latest `.dmg` from [Releases](../../releases), open it and drag **Koe** to Applications.
+```sh
+curl -fsSL https://raw.githubusercontent.com/nqrwhal/Koe/main/install.sh | sh
+```
 
-Koe isn't notarized yet, so the first time, **right-click Koe → Open** (or run `xattr -dr com.apple.quarantine /Applications/Koe.app`). Then grant **Accessibility** (to see the hotkey and paste) and **Microphone** access when asked.
+This downloads the latest release into `/Applications` (or `~/Applications`) and opens it; run it again to update. Then grant **Accessibility** (to see the hotkey and paste) and **Microphone** access when asked. On first launch Koe downloads its models (about 6 GB) from Hugging Face.
 
-On first launch Koe downloads its models (about 6 GB) from Hugging Face. Requires an Apple Silicon Mac with macOS 15 or later; 16 GB+ RAM recommended.
+Requires an Apple Silicon Mac with macOS 15 or later; 16 GB+ RAM recommended.
+
+<details>
+<summary>Or install from the DMG</summary>
+
+Download `Koe-<version>.dmg` from [Releases](../../releases), open it and drag **Koe** to Applications. Koe isn't notarized, so the first time **right-click Koe → Open** (or run `xattr -dr com.apple.quarantine /Applications/Koe.app`). The install script avoids this because `curl` doesn't quarantine downloads.
+</details>
 
 ## Build from source
 
@@ -29,7 +37,7 @@ Requires Xcode with the Metal Toolchain (`xcodebuild -downloadComponent MetalToo
 
 ```sh
 ./build.sh        # builds, installs to ~/Applications/Koe.app and launches it
-./make-dmg.sh     # packages dist/Koe-<version>.dmg
+./package.sh      # packages dist/Koe.zip (for install.sh) and dist/Koe-<version>.dmg
 ```
 
 `Koe --eval file.wav …` runs the full pipeline on 16 kHz recordings and prints JSON lines with timings.
