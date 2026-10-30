@@ -3,12 +3,53 @@ import Foundation
 /// Lines up Qwen's transcript (B: verbatim, good casing) against Bark's (A: drops fillers and
 /// repeats) word by word. Fillers and repeats only B has are dropped; the remaining differences,
 /// plus spans where B nearly spells a vocabulary term, are the choices Gemma needs to settle.
-/// Results come sentence by sentence, so Gemma only sees the sentences that contain a choice.
+/// Results come sentence by sentence, so Gemma only sees the sentences that contain a choice,
+/// and ``merge(_:into:)`` keeps its answer to exactly those choices.
 struct Disagreements {
     struct Sentence {
         let a: String  // with the alternative reading at each choice
         let b: String  // Qwen's cleaned reading
         let disputed: Bool
+        /// Both readings of every disputed span, for picking relevant vocabulary.
+        let disputedText: String
+        fileprivate let slots: [Slot]
+    }
+
+    /// One of Qwen's words, marked by whether the recognizers disagreed there. A disputed slot
+    /// with no text marks a place where only Bark heard something.
+    fileprivate struct Slot {
+        let text: String
+        let disputed: Bool
+    }
+
+    /// Keeps Gemma's answer only where the recognizers disagreed. Words both of them heard come
+    /// back exactly as Qwen wrote them, and nothing is added between them or dropped, so a fusion
+    /// can fix "cubectile" but can't turn "my studio" into "my LM Studio" or lose "computer use".
+    static func merge(_ fused: String, into group: some Sequence<Sentence>) -> String {
+        let slots = group.flatMap(\.slots)
+        let words = fused.split(separator: " ").map(String.init)
+        let pairs = match(slots.map { key($0.text) }, words.map(key))
+        var out: [String] = []
+        var s = 0, w = 0
+        for (ms, mw) in pairs + [(slots.count, words.count)] {
+            // Between two matches: Qwen's slots s..<ms that Gemma didn't keep, and words w..<mw it wrote instead.
+            let gap = slots[s..<ms]
+            var answered = false
+            for slot in gap {
+                if !slot.disputed {
+                    out.append(slot.text)  // a word both recognizers heard: always restored
+                } else if !answered {
+                    out += words[w..<mw]
+                    answered = true
+                }
+            }
+            let besideDispute = (s > 0 && slots[s - 1].disputed) || (ms < slots.count && slots[ms].disputed)
+            if !answered && besideDispute { out += words[w..<mw] }
+            if ms < slots.count { out.append(slots[ms].disputed ? words[mw] : slots[ms].text) }
+            s = ms + 1
+            w = mw + 1
+        }
+        return out.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     private enum Piece {
@@ -50,22 +91,29 @@ struct Disagreements {
 
     func sentences() -> [Sentence] {
         var result: [Sentence] = []
-        var a: [String] = [], b: [String] = []
+        var a: [String] = [], b: [String] = [], slots: [Slot] = [], disputedText: [String] = []
         var disputed = false
         func flush() {
             if !b.isEmpty || !a.isEmpty {
-                result.append(Sentence(a: a.joined(separator: " "), b: b.joined(separator: " "), disputed: disputed))
+                result.append(Sentence(a: a.joined(separator: " "), b: b.joined(separator: " "), disputed: disputed,
+                                       disputedText: disputedText.joined(separator: " "), slots: slots))
             }
-            a = []; b = []; disputed = false
+            a = []; b = []; slots = []; disputedText = []; disputed = false
         }
         for piece in pieces {
             switch piece {
             case .word(let w):
                 a.append(w); b.append(w)
+                slots.append(Slot(text: w, disputed: false))
             case .choice(let alternative, let fallback, let trailing):
                 disputed = true
-                if !alternative.isEmpty { a.append(Self.ending(alternative, with: trailing)) }
-                if !fallback.isEmpty { b.append(Self.ending(fallback, with: trailing)) }
+                let alternative = Self.ending(alternative, with: trailing), fallback = Self.ending(fallback, with: trailing)
+                if !alternative.isEmpty { a.append(alternative) }
+                if !fallback.isEmpty { b.append(fallback) }
+                slots += fallback.isEmpty
+                    ? [Slot(text: "", disputed: true)]
+                    : fallback.split(separator: " ").map { Slot(text: String($0), disputed: true) }
+                disputedText += [alternative, fallback]
             }
             if let last = b.last?.last, ".?!".contains(last) { flush() }
         }

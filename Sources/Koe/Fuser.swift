@@ -23,10 +23,18 @@ actor Fuser {
     private var stopTokens: Set<Int> = []
     private var canTrim = false
 
-    func load(terms: [String]) async throws {
+    private static let configuration = ModelConfiguration(id: "mlx-community/gemma-4-e4b-it-4bit")
+
+    /// Downloads the model into the cache `load()` reads from, reporting progress (for the installer).
+    static func download(progress: @escaping @Sendable (Double) -> Void) async throws {
+        _ = try await LLMModelFactory.shared.load(
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: configuration,
+            progressHandler: { progress($0.fractionCompleted) })
+    }
+
+    func load() async throws {
         let context = try await LLMModelFactory.shared.load(
-            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(),
-            configuration: ModelConfiguration(id: "mlx-community/gemma-4-e4b-it-4bit"))
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: Self.configuration)
         let tokenizer = context.tokenizer
         stopTokens = Set([tokenizer.eosTokenId, tokenizer.convertTokenToId("<turn|>")].compactMap { $0 })
 
@@ -35,8 +43,9 @@ actor Fuser {
             Write the single most likely correct transcript. Where they disagree, pick the reading that makes sense; \
             where both are wrong about a technical term, fix its spelling and casing (e.g. "J W T" -> "JWT", "cube cuddle" -> "kubectl").
             Never add content that neither transcript supports. Keep punctuation.
-            Vocabulary — whenever the speaker plausibly said one of these, use exactly this spelling, \
-            even if both transcripts spell it differently (e.g. "whisper flow" -> "Wispr Flow"): \(terms.joined(separator: ", "))
+            Vocabulary — whenever the speaker plausibly said one of the listed terms, use exactly its spelling, \
+            even if both transcripts spell it differently (e.g. "whisper flow" -> "Wispr Flow"). \
+            Don't use a term the transcripts don't sound like.
             Reply with only the transcript.
 
 
@@ -60,15 +69,17 @@ actor Fuser {
         seamCache = try context.model.newCache(parameters: nil)
         eval(context.model(MLXArray(seamPrefix.map(Int32.init)).reshaped([1, seamPrefix.count]), cache: seamCache))
         self.context = context
-        _ = fuse("ok", "ok", draft: "ok", context: nil)  // compile kernels before the first real request
+        _ = fuse("ok", "ok", draft: "ok", context: nil, vocabulary: [])  // compile kernels before the first real request
     }
 
     /// Nil until the model has loaded. `draft` is the text the answer most likely resembles;
-    /// `context` is the already-final text just before this piece of a longer dictation.
-    func fuse(_ a: String, _ b: String, draft: String, context preceding: String?) -> String? {
+    /// `context` is the already-final text just before this piece of a longer dictation;
+    /// `vocabulary` the terms that might appear in it (see ``Vocabulary/relevant(to:terms:limit:)``).
+    func fuse(_ a: String, _ b: String, draft: String, context preceding: String?, vocabulary: [String]) -> String? {
         guard let context else { return nil }
         let tokenizer = context.tokenizer
-        let lead = preceding.map { "(Preceding text, already final; do not repeat it: \($0))\n" } ?? ""
+        var lead = preceding.map { "Earlier in this dictation (context only): \($0)\n" } ?? ""
+        if !vocabulary.isEmpty { lead += "Vocabulary: \(vocabulary.joined(separator: ", "))\n" }
         let prompt = tokenizer.encode(text: lead + "A: \(a)\nB: \(b)<turn|>\n<|turn>model\n", addSpecialTokens: false)
         let draftSource = canTrim ? tokenizer.encode(text: draft, addSpecialTokens: false) : []
         let cache = prefixCache.map { $0.copy() }

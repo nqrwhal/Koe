@@ -1,6 +1,11 @@
 import AppKit
 import AVFoundation
 
+// koe --install-models : download every model up front (used by install.sh).
+if CommandLine.arguments.contains("--install-models") {
+    exit(await ModelInstaller.run())
+}
+
 // koe --eval file.wav… : run the live pipeline on 16 kHz recordings and print JSON lines (ms = after release).
 if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "--eval" {
     let pipeline = Pipeline()
