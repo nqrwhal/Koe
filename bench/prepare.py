@@ -1,5 +1,6 @@
-"""Samples clips from the Open ASR Leaderboard test sets (hf-audio/open-asr-leaderboard parquet)
-into 16 kHz WAVs plus references, so every system is scored on exactly the same audio.
+"""Samples clips from the Open ASR Leaderboard's public test sets (hf-audio/open-asr-leaderboard and
+the Voice Arena Monsoon parquet) into 16 kHz WAVs plus references, so every system is scored on
+exactly the same audio.
 
 usage: python bench/prepare.py [clips per set]
 Reads bench/data/raw/<config>/*.parquet (see bench/run.sh), writes bench/data/<set>/<id>.wav and refs.jsonl.
@@ -14,15 +15,17 @@ import soundfile as sf
 ROOT = Path(__file__).resolve().parent / "data"
 PER_SET = int(sys.argv[1]) if len(sys.argv) > 1 else 500
 SETS = {  # name: (config folder, filename prefix)
+    "ami_cleaned": ("ami_cleaned", "test"),
+    "gigaspeech_cleaned": ("gigaspeech_cleaned", "test"),
     "librispeech_clean": ("librispeech", "test.clean"),
     "librispeech_other": ("librispeech", "test.other"),
-    "voxpopuli": ("voxpopuli", "test"),
-    "earnings22": ("earnings22", "test"),
-    "ami": ("ami", "test"),
-    "common_voice": ("common_voice", "test"),
-    "gigaspeech": ("gigaspeech", "test"),
     "spgispeech": ("spgispeech", "test"),
+    "urgent2024": ("urgent2024", "test"),
+    "monsoon": ("monsoon", "test"),
+    "voxpopuli_cleaned_aa": ("voxpopuli_cleaned_aa", "test"),
+    "common_voice": ("common_voice", "test"),
 }
+FULL = {"urgent2024", "voxpopuli_cleaned_aa"}  # small enough to use every clip
 
 def resample(audio, rate):
     if rate == 16_000:
@@ -42,7 +45,7 @@ for name, (config, prefix) in SETS.items():
         rows += [(shard, i, str(id_), text) for i, (id_, text) in
                  enumerate(zip(table["id"].to_pylist(), table["text"].to_pylist())) if text and text.strip()]
     random.Random(0).shuffle(rows)
-    chosen = rows[:PER_SET]
+    chosen = rows if name in FULL else rows[:PER_SET]
     out = ROOT / name
     out.mkdir(parents=True, exist_ok=True)
     refs = []
@@ -75,3 +78,14 @@ if (fleurs / "test.tsv").exists():
         for r in refs:
             f.write(json.dumps(r) + "\n")
     print(f"fleurs_en: {len(refs)} clips")
+
+# Earnings-22 (cleaned) comes in chunks with no per-chunk transcripts: score.py joins each call's
+# chunks in order and scores them against the call's full transcript, as the leaderboard does.
+earnings = ROOT / "raw" / "earnings22_chunked"
+if (earnings / "chunks.jsonl").exists():
+    (ROOT / "earnings22_cleaned").mkdir(exist_ok=True)
+    with open(ROOT / "earnings22_cleaned" / "refs.jsonl", "w") as f:
+        for r in map(json.loads, open(earnings / "chunks.jsonl")):
+            f.write(json.dumps({"id": r["file_name"][:-4], "file": str(earnings / "audio" / r["file_name"]),
+                                "text": "(scored per call)"}) + "\n")
+    print("earnings22_cleaned: chunks listed")
