@@ -40,6 +40,8 @@ Sentences full of developer and AI terms (kubectl, Supabase, Ghostty, MCP…): 4
 
 These are the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open_asr_leaderboard) sets that speech-model releases report, scored the leaderboard's way: Whisper's English normalizer, WER per set, plain average. Wispr Flow's Canto announcement quotes LibriSpeech, FLEURS and Common Voice, and Aqua Voice quotes its leaderboard average.
 
+AMI, Earnings-22, GigaSpeech and VoxPopuli use their original transcripts, the version most model cards quote. Since 2026 the live leaderboard has defaulted to re-transcribed ("cleaned") versions of these four. Every model scores lower on those, so its current numbers can't be compared with this table.
+
 | Model | Avg | AMI | Earnings-22 | GigaSpeech | LS clean | LS other | SPGISpeech | VoxPopuli |
 |---|---|---|---|---|---|---|---|---|
 | **Koe** (Bark ∥ Qwen → Gemma) | 8.02 | 15.52 | 12.23 | 11.76 | 2.11 | 4.43 | 2.77 | 7.32 |
