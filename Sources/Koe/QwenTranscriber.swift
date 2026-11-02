@@ -29,10 +29,14 @@ actor QwenTranscriber {
         self.model = model
     }
 
-    /// Nil until the model has loaded. Expects 16 kHz mono samples.
+    /// Nil until the model has loaded, and when the output runs into a cap no speech reaches: on a
+    /// noisy tail Qwen can loop ("a person who is a person who is …") for minutes, and then
+    /// Bark's reading is used alone. Expects 16 kHz mono samples.
     func transcribe(_ samples: [Float]) -> String? {
         guard let model else { return nil }
-        return model.generate(audio: MLXArray(samples), language: "English")
-            .text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxTokens = 32 + samples.count * 12 / 16_000  // speech stays well under 12 tokens a second
+        let output = model.generate(audio: MLXArray(samples), maxTokens: maxTokens, language: "English")
+        guard output.generationTokens < maxTokens else { return nil }
+        return output.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -65,7 +65,9 @@ final class LiveTranscription {
         let released = Date()
         let tail = Array(recording[min(segmentStart, recording.count)...])
         var pieces = try await pending?.value ?? []
-        if !tail.isEmpty || pieces.isEmpty {
+        // A pause before release that nothing followed would only come back as "the" or "yeah".
+        let tailSpoken = !tail.isEmpty && Self.hasSpeech(probabilities[min(segmentStart / Self.block, probabilities.count)...])
+        if tailSpoken || pieces.isEmpty {
             pieces.append(try await Self.transcribe(tail.isEmpty ? recording : tail, after: pieces, with: pipeline))
         }
         return Outcome(text: Self.join(pieces), segments: pieces.map(\.result),
@@ -96,19 +98,30 @@ final class LiveTranscription {
         let length = end - segmentStart
         guard length >= Self.minSegment else { return }
 
-        // A pause: cut in its middle.
+        // A pause: cut in its middle. Only this segment's blocks count, or a long pause would
+        // cut again at every block, into slivers of silence that come back as "the" and "yeah".
+        let firstBlock = segmentStart / Self.block
         var silent = 0
-        while silent < probabilities.count && probabilities[probabilities.count - 1 - silent] < Self.silenceProbability {
+        while firstBlock + silent < probabilities.count && probabilities[probabilities.count - 1 - silent] < Self.silenceProbability {
             silent += 1
         }
         if silent >= Self.pauseBlocks {
-            submit(upTo: end - silent * Self.block / 2)
+            let cut = end - silent * Self.block / 2
+            if Self.hasSpeech(probabilities[firstBlock..<probabilities.count - silent]) {
+                submit(upTo: cut)
+            } else {
+                segmentStart = cut  // nothing was said: skip it
+            }
         } else if length >= Self.maxSegment {
             // No pause for a long time: cut in the quietest block of the last few seconds.
             let first = max(segmentStart / Self.block + 1, probabilities.count - 24)
             let quietest = (first..<probabilities.count).min { probabilities[$0] < probabilities[$1] } ?? probabilities.count - 1
             submit(upTo: quietest * Self.block + Self.block / 2)
         }
+    }
+
+    private static func hasSpeech(_ blocks: ArraySlice<Float>) -> Bool {
+        blocks.contains { $0 >= silenceProbability }
     }
 
     private func submit(upTo cut: Int) {

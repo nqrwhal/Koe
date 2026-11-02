@@ -20,6 +20,7 @@ struct Disagreements {
     fileprivate struct Slot {
         let text: String
         let disputed: Bool
+        var alternative = ""  // Bark's reading of the disputed span this slot belongs to
     }
 
     /// Keeps Gemma's answer only where the recognizers disagreed. Words both of them heard come
@@ -34,17 +35,25 @@ struct Disagreements {
         for (ms, mw) in pairs + [(slots.count, words.count)] {
             // Between two matches: Qwen's slots s..<ms that Gemma didn't keep, and words w..<mw it wrote instead.
             let gap = slots[s..<ms]
+            let answer = Array(words[w..<mw])
+            let qwen = gap.filter(\.disputed).map(\.text).filter { !$0.isEmpty }
+            var barkSpans: [String] = []  // a span's slots share its reading: keep each once, in order
+            for slot in gap where slot.disputed && barkSpans.last != slot.alternative { barkSpans.append(slot.alternative) }
+            let bark = barkSpans.joined(separator: " ").split(separator: " ")
+            // An answer much longer than both readings is something Gemma made up (a repeated
+            // sentence, a loop of "okay the okay the …"), not a reading of the span: keep Qwen's.
+            let plausible = answer.count <= max(qwen.count, bark.count) + 2
             var answered = false
             for slot in gap {
                 if !slot.disputed {
                     out.append(slot.text)  // a word both recognizers heard: always restored
                 } else if !answered {
-                    out += words[w..<mw]
+                    out += plausible ? answer : qwen
                     answered = true
                 }
             }
             let besideDispute = (s > 0 && slots[s - 1].disputed) || (ms < slots.count && slots[ms].disputed)
-            if !answered && besideDispute { out += words[w..<mw] }
+            if !answered && besideDispute && answer.count <= 2 { out += answer }
             if ms < slots.count { out.append(slots[ms].disputed ? words[mw] : slots[ms].text) }
             s = ms + 1
             w = mw + 1
@@ -111,8 +120,8 @@ struct Disagreements {
                 if !alternative.isEmpty { a.append(alternative) }
                 if !fallback.isEmpty { b.append(fallback) }
                 slots += fallback.isEmpty
-                    ? [Slot(text: "", disputed: true)]
-                    : fallback.split(separator: " ").map { Slot(text: String($0), disputed: true) }
+                    ? [Slot(text: "", disputed: true, alternative: alternative)]
+                    : fallback.split(separator: " ").map { Slot(text: String($0), disputed: true, alternative: alternative) }
                 disputedText += [alternative, fallback]
             }
             if let last = b.last?.last, ".?!".contains(last) { flush() }
