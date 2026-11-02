@@ -59,6 +59,7 @@ These are the [Open ASR Leaderboard](https://huggingface.co/spaces/hf-audio/open
 | Qwen3-ASR 0.6B alone | 11.64 | 6.52 |
 | Hex (Parakeet Unified 0.6B) | 8.48 | 5.66 |
 
+- These sets favor models trained on their own corpora. Parakeet, the base of Bark, lists the training splits of LibriSpeech, Common Voice and AMI (v2 also VoxPopuli) among its human-transcribed data. Speech that sounds like those corpora is easy for it; new jargon isn't, which is why the dictation results above matter more for Koe.
 - Koe beats both of its own recognizers on 6 of these 9 sets. Newer models such as Hex's Parakeet Unified, and larger ones such as Granite Speech, are more accurate on read and broadcast speech. Koe's edge is the jargon above.
 - Koe writes clean text, so it drops stutters and filler phrases ("I think I think", "you know"). The leaderboard's normalizer only removes sounds like "uh", "um" and "mm", so the rest counts as errors on conversational sets. That explains most of Koe's gap on AMI's meeting recordings.
 - The top four rows were run here on the same audio: 500 random clips per set, and all 647 for FLEURS. That leaves up to ±1 point of sampling noise on the harder sets. Rows marked ¹ are published full-set results, for reference. Our 4-bit Qwen3-ASR sample scored 7.55 against its published 7.24.
