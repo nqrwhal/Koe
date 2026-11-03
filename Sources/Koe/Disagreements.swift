@@ -1,7 +1,8 @@
 import Foundation
 
 /// Lines up Qwen's transcript (B: verbatim, good casing) against Bark's (A: drops fillers and
-/// repeats) word by word. Fillers and repeats only B has are dropped; the remaining differences,
+/// repeats) word by word. Fillers and repeats only B has are dropped, and numbers that are only
+/// spelled differently ("twenty thirty-two", "2032") count as agreeing; the remaining differences,
 /// plus spans where B nearly spells a vocabulary term, are the choices Gemma needs to settle.
 /// Results come sentence by sentence, so Gemma only sees the sentences that contain a choice,
 /// and ``merge(_:into:)`` keeps its answer to exactly those choices.
@@ -88,7 +89,10 @@ struct Disagreements {
                 gapB.append(bWords[k])
             }
             let gapA = aWords[i..<mi].filter { !Self.key($0).isEmpty }
-            if !gapA.isEmpty || !gapB.isEmpty {
+            if !gapA.isEmpty && !gapB.isEmpty && Numbers.same(gapA, gapB) {
+                // "twenty thirty-two" and "2032" agree: keep the form with digits, nearly always Qwen's.
+                pieces += (Numbers.digits(gapA) > Numbers.digits(gapB) ? Array(gapA) : gapB).map(Piece.word)
+            } else if !gapA.isEmpty || !gapB.isEmpty {
                 addChoice(a: gapA.joined(separator: " "), b: gapB)
             }
             if mj < bWords.count { pieces.append(.word(bWords[mj])) }
