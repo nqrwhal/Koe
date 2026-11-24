@@ -1,4 +1,4 @@
-<img src="Resources/AppIcon-preview.png" width="128" align="right" alt="Koe icon">
+<img src="https://raw.githubusercontent.com/nqrwhal/Koe/main/Resources/AppIcon-preview.png" width="128" align="right" alt="Koe icon">
 
 # Koe 声
 
@@ -133,7 +133,7 @@ Requires an Apple Silicon Mac with macOS 15 or later: **8 GB+ RAM** for ANE Solo
 <details>
 <summary>Or install from the DMG</summary>
 
-Download `Koe-<version>.dmg` from [Releases](../../releases), open it and drag **Koe** to Applications. Koe isn't notarized, so the first time **right-click Koe → Open** (or run `xattr -dr com.apple.quarantine /Applications/Koe.app`). The install script avoids this because `curl` doesn't quarantine downloads.
+Download `Koe-<version>.dmg` from [Releases](https://github.com/nqrwhal/Koe/releases), open it and drag **Koe** to Applications. Koe isn't notarized, so the first time **right-click Koe → Open** (or run `xattr -dr com.apple.quarantine /Applications/Koe.app`). The install script avoids this because `curl` doesn't quarantine downloads.
 </details>
 
 ## Build from source
