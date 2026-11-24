@@ -24,7 +24,7 @@ Koe is built for technical dictation: it gets jargon (`OIDC`, `kubectl`, `gRPC`)
 
 - **Shortcuts & capture:** Custom shortcut recorder supporting Hold to Talk, Tap to Toggle, or Double-Tap Lock for hands-free dictation, `Esc` to cancel, and **Paste Last Dictation** (`⌥⇧V` by default). Includes a microphone selector and warm-mic pre-roll timer (`Off`, `1`, `3`, or `5` min; 3 min default with 0.3 s rolling pre-roll).
 - **Models & memory:** Live process footprint and MLX GPU memory monitor, manual **Unload GPU** button, 1-click presets, and background model switching with download progress.
-- **Tuning & vocabulary:** Sliders for segment/pause thresholds, cleanup toggles, **Smart Context Spacing** (reads the character before the cursor via Accessibility), a live cleanup preview sandbox, and live-reloading **Personal Vocabulary** and **Word Replacements** editors.
+- **Tuning & vocabulary:** Sliders for **Key-Release Tail** (`220 ms` default with adaptive trailing-speech extension so final syllables aren't clipped) and segment/pause thresholds, cleanup toggles, **Smart Context Spacing** (reads the character before the cursor via Accessibility), a live cleanup preview sandbox, and live-reloading **Personal Vocabulary** and **Word Replacements** editors.
 - **History & Pipeline Diff Inspector:** Searchable local history (`~/Library/Application Support/Koe/history.json`) with route badges (`ane-solo`, `agree`, `fuse`), per-stage latencies, `Base ANE → Final` and `Qwen3-ASR → Final` word diffs, WAV playback (when recording saving is enabled), and 1-click add to vocabulary.
 
 ## Benchmarks (v0.5)

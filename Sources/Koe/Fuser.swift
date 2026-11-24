@@ -60,6 +60,7 @@ actor Fuser {
             Write the single most likely correct transcript. Where they disagree, pick the reading that makes sense; \
             where both are wrong about a technical term, fix its spelling and casing (e.g. "J W T" -> "JWT", "cube cuddle" -> "kubectl").
             Fix obvious intra-word punctuation glitches (e.g. "tuning,s" -> "tunings"). Never add content that neither transcript supports. Keep clean punctuation.
+            If one transcript cuts off the final syllable or word at the end while the other completes the phrase naturally (not a trailing filler like "so" or "um"), keep the complete ending.
             Vocabulary — whenever the speaker plausibly said one of the listed terms, use exactly its spelling, \
             even if both transcripts spell it differently (e.g. "whisper flow" -> "Wispr Flow"). \
             Don't use a term the transcripts don't sound like.

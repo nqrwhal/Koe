@@ -112,6 +112,7 @@ final class Recorder {
     private var capturing = false
     private var samples: [Float] = []
     private var ring: [Float] = []
+    private var peakRMS: Float = 0
     private var startedAt = Date()
     private var firstBufferLogged = false
 
@@ -140,6 +141,7 @@ final class Recorder {
         let warm = queue != nil
         lock.withLock {
             samples = warm ? Array(ring.suffix(Int(preRollSeconds * sampleRate))) : []
+            peakRMS = Self.computeRMS(samples)
             onCapture(samples)
             startedAt = Date()
             firstBufferLogged = warm
@@ -223,7 +225,30 @@ final class Recorder {
         #endif
     }
 
+    func hasActiveTailSpeech(windowSeconds: Double = 0.06) -> Bool {
+        let (tail, peak): ([Float], Float) = lock.withLock {
+            guard capturing, !samples.isEmpty else { return ([], 0) }
+            let count = min(samples.count, max(160, Int(windowSeconds * sampleRate)))
+            return (Array(samples.suffix(count)), peakRMS)
+        }
+        guard peak >= 0.008, !tail.isEmpty else { return false }
+        let tailRMS = Self.computeRMS(tail)
+        return tailRMS >= max(0.004, peak * 0.12)
+    }
+
+    static func computeRMS(_ samples: [Float]) -> Float {
+        samples.withUnsafeBufferPointer { computeRMS($0) }
+    }
+
+    static func computeRMS(_ samples: UnsafeBufferPointer<Float>) -> Float {
+        guard !samples.isEmpty, let base = samples.baseAddress else { return 0 }
+        var rms: Float = 0
+        vDSP_rmsqv(base, 1, &rms, vDSP_Length(samples.count))
+        return rms
+    }
+
     private func receive(_ chunk: UnsafeBufferPointer<Float>) {
+        let rms = Self.computeRMS(chunk)
         let isCapturing = lock.withLock {
             if capturing {
                 if !firstBufferLogged {
@@ -231,6 +256,7 @@ final class Recorder {
                     let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
                     log.info("first audio \(ms, privacy: .public)ms after press")
                 }
+                peakRMS = max(peakRMS, rms)
                 samples.append(contentsOf: chunk)
                 onCapture(Array(chunk))
             } else {
@@ -240,9 +266,7 @@ final class Recorder {
             }
             return capturing
         }
-        guard isCapturing, let base = chunk.baseAddress else { return }
-        var rms: Float = 0
-        vDSP_rmsqv(base, 1, &rms, vDSP_Length(chunk.count))
+        guard isCapturing, !chunk.isEmpty else { return }
         let db = 20 * log10(max(rms, 1e-6))
         let level = min(max((db + 55) / 40, 0), 1)
         DispatchQueue.main.async { self.onLevel(level) }

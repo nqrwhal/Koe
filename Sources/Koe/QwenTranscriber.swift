@@ -8,6 +8,7 @@ import MLXAudioSTT
 /// so the second opinion costs little extra wall time.
 actor QwenTranscriber {
     private static let repo = "mlx-community/Qwen3-ASR-0.6B-4bit"
+    private static let trailingSilenceSamples = 4_000  // 250 ms post-speech pad at 16 kHz
     private var model: Qwen3ASRModel?
 
     var isLoaded: Bool { model != nil }
@@ -44,9 +45,10 @@ actor QwenTranscriber {
 
     /// Nil until loaded, or when output loops into the token cap. Expects 16 kHz mono samples.
     func transcribe(_ samples: [Float]) -> String? {
-        guard let model else { return nil }
+        guard let model, !samples.isEmpty else { return nil }
         let maxTokens = 32 + samples.count * 12 / 16_000
-        let output = model.generate(audio: MLXArray(samples), maxTokens: maxTokens, language: "English")
+        let padded = samples + [Float](repeating: 0, count: Self.trailingSilenceSamples)
+        let output = model.generate(audio: MLXArray(padded), maxTokens: maxTokens, language: "English")
         guard output.generationTokens < maxTokens else { return nil }
         return output.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }

@@ -134,6 +134,11 @@ if args.contains("--self-test") {
             check(reloaded.entries.count == 1 && reloaded.entries.first?.text == "Test transcript", "HistoryStore round-trip failed")
         }
 
+        // 9. Release tail defaults & RMS helper
+        check(opts.releaseTailMs == 220 && opts.adaptiveReleaseTail, "Default release tail options mismatch")
+        check(Recorder.computeRMS([Float](repeating: 0, count: 64)) == 0, "Zero signal should have zero RMS")
+        check(Recorder.computeRMS([0.5, -0.5, 0.5, -0.5]) > 0.49, "Signal RMS mismatch")
+
         print("ALL SELF-TESTS PASSED")
         return 0
     }

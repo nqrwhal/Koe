@@ -689,7 +689,28 @@ private struct TuningSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Sentence Segmentation") {
+            Section("Capture & Segmentation") {
+                HStack {
+                    Text("Key-Release Tail")
+                    Spacer()
+                    Text("\(settings.releaseTailMs) ms")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(settings.releaseTailMs) },
+                        set: { settings.releaseTailMs = Int($0.rounded()) }
+                    ),
+                    in: 80...450,
+                    step: 10
+                )
+                Text("Keeps listening briefly after you let go so the final syllable isn't cut off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Toggle("Auto-extend briefly if your voice is still trailing on release", isOn: $settings.adaptiveReleaseTail)
+
                 if settings.engineMode == .aneSolo && settings.baseModel.supportsNativeStreaming {
                     Label(
                         "Continuous Neural Engine streaming is active — speech is never split at pauses, so sentences are never truncated.",

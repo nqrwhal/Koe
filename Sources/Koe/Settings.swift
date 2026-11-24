@@ -444,6 +444,8 @@ final class AppSettings: ObservableObject {
         static let pasteLastShortcut = "koe.pasteLastShortcut"
         static let selectedMicUID = "koe.selectedMicUID"
         static let keepMicWarmSeconds = "koe.keepMicWarmSeconds"
+        static let releaseTailMs = "koe.releaseTailMs"
+        static let adaptiveReleaseTail = "koe.adaptiveReleaseTail"
         static let minSegmentSeconds = "koe.minSegmentSeconds"
         static let pauseThresholdSeconds = "koe.pauseThresholdSeconds"
         static let wholeDictationOnly = "koe.wholeDictationOnly"
@@ -495,6 +497,20 @@ final class AppSettings: ObservableObject {
     }
     @Published var keepMicWarmSeconds: Int {
         didSet { save(keepMicWarmSeconds, forKey: Keys.keepMicWarmSeconds); scheduleNotify(\.pendingRecorderNotify) { $0.onRecorderConfigChanged } }
+    }
+
+    @Published var releaseTailMs: Int {
+        didSet {
+            let clamped = min(500, max(80, releaseTailMs))
+            if releaseTailMs != clamped {
+                releaseTailMs = clamped
+                return
+            }
+            save(releaseTailMs, forKey: Keys.releaseTailMs)
+        }
+    }
+    @Published var adaptiveReleaseTail: Bool {
+        didSet { save(adaptiveReleaseTail, forKey: Keys.adaptiveReleaseTail) }
     }
 
     @Published var minSegmentSeconds: Double {
@@ -563,6 +579,9 @@ final class AppSettings: ObservableObject {
 
         selectedMicUID = defaults.string(forKey: Keys.selectedMicUID)
         keepMicWarmSeconds = defaults.object(forKey: Keys.keepMicWarmSeconds) as? Int ?? 180
+        let storedTailMs = defaults.object(forKey: Keys.releaseTailMs) as? Int ?? 220
+        releaseTailMs = min(500, max(80, storedTailMs))
+        adaptiveReleaseTail = defaults.object(forKey: Keys.adaptiveReleaseTail) as? Bool ?? true
 
         minSegmentSeconds = defaults.object(forKey: Keys.minSegmentSeconds) as? Double ?? 10.0
         pauseThresholdSeconds = defaults.object(forKey: Keys.pauseThresholdSeconds) as? Double ?? 1.5
@@ -592,6 +611,8 @@ final class AppSettings: ObservableObject {
             fuserModel: fuserModel,
             ctcVocabBoosting: ctcVocabBoosting,
             idleUnloadMinutes: idleUnloadMinutes,
+            releaseTailMs: releaseTailMs,
+            adaptiveReleaseTail: adaptiveReleaseTail,
             minSegmentSeconds: minSegmentSeconds,
             pauseThresholdSeconds: pauseThresholdSeconds,
             wholeDictationOnly: wholeDictationOnly,
@@ -633,6 +654,8 @@ struct TuningOptions: Sendable, Equatable {
     var fuserModel: FuserModel = .qwen3_1_7b
     var ctcVocabBoosting: Bool = true
     var idleUnloadMinutes: Int = 10
+    var releaseTailMs: Int = 220
+    var adaptiveReleaseTail: Bool = true
     var minSegmentSeconds: Double = 10.0
     var pauseThresholdSeconds: Double = 1.5
     var wholeDictationOnly: Bool = false

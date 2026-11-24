@@ -141,7 +141,7 @@ final class LiveTranscription {
         let tail = Array(recording[min(segmentStart, recording.count)...])
         var pieces = try await pending?.value ?? []
         let tailSlice = probabilities[min(segmentStart / Self.block, probabilities.count)...]
-        let tailSpoken = !tail.isEmpty && (vad == nil || Self.hasSpeech(tailSlice))
+        let tailSpoken = !tail.isEmpty && (vad == nil || Self.hasSpeech(tailSlice) || Self.hasAudibleEnergy(tail))
         if tailSpoken || pieces.isEmpty {
             pieces.append(try await Self.transcribe(tail.isEmpty ? recording : tail, after: pieces, with: pipeline, options: options))
         }
@@ -202,6 +202,15 @@ final class LiveTranscription {
                 cutIfReady()
             }
         }
+        if let vad, samples.count > probabilities.count * Self.block {
+            let start = probabilities.count * Self.block
+            var trailingBlock = Array(samples[start...])
+            if trailingBlock.count < Self.block {
+                trailingBlock += [Float](repeating: 0, count: Self.block - trailingBlock.count)
+            }
+            let result = try? await vad.processStreamingChunk(trailingBlock, state: state)
+            probabilities.append(result?.probability ?? 1)
+        }
     }
 
     private func cutIfReady() {
@@ -230,6 +239,10 @@ final class LiveTranscription {
 
     private static func hasSpeech(_ blocks: ArraySlice<Float>) -> Bool {
         blocks.contains { $0 >= silenceProbability }
+    }
+
+    private static func hasAudibleEnergy(_ samples: [Float]) -> Bool {
+        samples.contains { abs($0) >= 0.015 }
     }
 
     private func submit(upTo cut: Int) {

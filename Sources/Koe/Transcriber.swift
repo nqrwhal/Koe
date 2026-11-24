@@ -18,6 +18,8 @@ actor Transcriber {
         interleaved: false
     )!
 
+    private static let trailingSilenceSamples = 7_680  // 480 ms (six 80 ms FastConformer frames) so RNNT emits final syllables
+
     private let converter = AudioConverter()
     private var backend: Backend = .parakeetUnifiedStreaming
     private var streamingUnified: StreamingUnifiedAsrManager?
@@ -159,8 +161,9 @@ actor Transcriber {
 
     func finishStream() async throws -> String {
         guard let streamingUnified else { throw ASRError.notInitialized }
-        if streamAppendedSamples > 0 && streamAppendedSamples < 16_000 {
-            let pad = [Float](repeating: 0, count: 16_000 - streamAppendedSamples)
+        if streamAppendedSamples > 0 {
+            let padCount = max(Self.trailingSilenceSamples, 16_000 - streamAppendedSamples)
+            let pad = [Float](repeating: 0, count: padCount)
             if let padBuf = makeBuffer(pad) {
                 try await streamingUnified.appendAudio(padBuf)
             }
@@ -181,9 +184,8 @@ actor Transcriber {
     func transcribe(_ samples: [Float], sampleRate: Double) async throws -> String {
         var audio = sampleRate == 16_000 ? samples : try converter.resample(samples, from: sampleRate)
         if audio.isEmpty { return "" }
-        if audio.count < 16_000 {
-            audio += [Float](repeating: 0, count: 16_000 - audio.count)
-        }
+        let padCount = max(Self.trailingSilenceSamples, 16_000 - audio.count)
+        audio += [Float](repeating: 0, count: padCount)
 
         switch backend {
         case .parakeetUnifiedStreaming:

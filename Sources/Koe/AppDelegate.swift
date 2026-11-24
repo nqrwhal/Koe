@@ -80,9 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var recording = false
     private var captureRelay: CaptureRelay?
     private var startLiveTask: Task<Void, Never>?
-
-    /// Keep listening briefly after release so the last syllable isn't clipped.
-    private let tail: TimeInterval = 0.05
+    private var finishTailTask: Task<Void, Never>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -155,7 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: Dictation
 
     private func startRecording() {
-        guard !recording else { return }
+        guard !recording, finishTailTask == nil else { return }
         let relay = CaptureRelay()
         captureRelay = relay
         recorder.onCapture = { relay.receive($0) }
@@ -182,101 +180,117 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func finishRecording() {
-        guard recording else { return }
+        guard recording, finishTailTask == nil else { return }
         hud.show(.transcribing)
+        let released = Date()
+        let opts = settings.snapshot()
 
-        let relay = captureRelay
-        let liveStart = startLiveTask
-        captureRelay = nil
-        startLiveTask = nil
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + tail) { [self] in
-            let samples = recorder.stop()
-            let rate = recorder.sampleRate
-            recording = false
-            setIcon(ready ? .idle : .loading)
-            let released = Date()
-            let opts = settings.snapshot()
-
-            Task { @MainActor in
-                do {
-                    await modelLoad?.value
-                    _ = await liveStart?.value
-                    let session = relay?.cancel()
-
-                    let text: String
-                    let baseText: String
-                    let qwenText: String?
-                    let route: String
-                    let baseMs: Int
-                    let qwenMs: Int
-                    let fuseMs: Int
-                    let segments: Int
-                    let modelSummary: String
-                    let tailMs: Int
-
-                    if let session {
-                        let outcome = try await session.finish(samples)
-                        text = outcome.text
-                        baseText = outcome.segments.map(\.baseText).joined(separator: " ")
-                        let qParts = outcome.segments.compactMap(\.qwenText).filter { !$0.isEmpty }
-                        qwenText = qParts.isEmpty ? nil : qParts.joined(separator: " ")
-                        route = outcome.segments.last?.route ?? "none"
-                        baseMs = outcome.segments.map(\.baseMs).reduce(0, +)
-                        qwenMs = outcome.segments.map(\.qwenMs).reduce(0, +)
-                        fuseMs = outcome.segments.map(\.fuseMs).reduce(0, +)
-                        segments = outcome.segments.count
-                        modelSummary = outcome.segments.last?.modelSummary ?? opts.baseModel.shortName
-                        tailMs = outcome.tailMs
-                    } else {
-                        let r = try await pipeline.transcribe(samples, options: opts)
-                        text = r.text
-                        baseText = r.baseText
-                        qwenText = r.qwenText
-                        route = r.route
-                        baseMs = r.baseMs
-                        qwenMs = r.qwenMs
-                        fuseMs = r.fuseMs
-                        segments = 1
-                        modelSummary = r.modelSummary
-                        tailMs = Int(Date().timeIntervalSince(released) * 1000)
-                    }
-
-                    let audioFile = Recordings.save(samples, sampleRate: rate, transcript: text)
-                    hud.hide()
-                    guard !text.isEmpty else { return }
-
-                    Paster.paste(text, spacing: opts.spacingMode)
-
-                    let audioSeconds = Double(samples.count) / rate
-                    let entry = HistoryEntry(
-                        text: text,
-                        baseText: baseText,
-                        qwenText: qwenText,
-                        route: route,
-                        durationSeconds: audioSeconds,
-                        tailMs: tailMs,
-                        baseMs: baseMs,
-                        qwenMs: qwenMs,
-                        fuseMs: fuseMs,
-                        segments: segments,
-                        modelSummary: modelSummary,
-                        audioFilename: audioFile
-                    )
-                    history.append(entry)
-
-                    let pasteMs = Int(Date().timeIntervalSince(released) * 1000)
-                    log.info("\(audioSeconds, format: .fixed(precision: 1), privacy: .public)s audio → \(pasteMs, privacy: .public)ms to paste; \(segments, privacy: .public) seg(s), \(route, privacy: .public)")
-                } catch {
-                    hud.hide()
-                    log.error("transcription failed: \(error, privacy: .public)")
+        finishTailTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let baseMs = max(80, opts.releaseTailMs)
+            try? await Task.sleep(for: .milliseconds(baseMs))
+            var extraMs = 0
+            if opts.adaptiveReleaseTail {
+                for _ in 0..<3 {
+                    guard !Task.isCancelled, self.recorder.hasActiveTailSpeech() else { break }
+                    try? await Task.sleep(for: .milliseconds(50))
+                    extraMs += 50
                 }
+            }
+            if extraMs > 0 {
+                log.info("extended release tail by \(extraMs, privacy: .public)ms for trailing speech")
+            }
+            guard !Task.isCancelled, self.recording else { return }
+            self.finishTailTask = nil
+
+            let samples = self.recorder.stop()
+            let rate = self.recorder.sampleRate
+            let relay = self.captureRelay
+            let liveStart = self.startLiveTask
+            self.captureRelay = nil
+            self.startLiveTask = nil
+            self.recording = false
+            self.setIcon(self.ready ? .idle : .loading)
+
+            do {
+                await self.modelLoad?.value
+                _ = await liveStart?.value
+                let session = relay?.cancel()
+
+                let text: String
+                let baseText: String
+                let qwenText: String?
+                let route: String
+                let baseMsElapsed: Int
+                let qwenMs: Int
+                let fuseMs: Int
+                let segments: Int
+                let modelSummary: String
+                let tailMs: Int
+
+                if let session {
+                    let outcome = try await session.finish(samples)
+                    text = outcome.text
+                    baseText = outcome.segments.map(\.baseText).joined(separator: " ")
+                    let qParts = outcome.segments.compactMap(\.qwenText).filter { !$0.isEmpty }
+                    qwenText = qParts.isEmpty ? nil : qParts.joined(separator: " ")
+                    route = outcome.segments.last?.route ?? "none"
+                    baseMsElapsed = outcome.segments.map(\.baseMs).reduce(0, +)
+                    qwenMs = outcome.segments.map(\.qwenMs).reduce(0, +)
+                    fuseMs = outcome.segments.map(\.fuseMs).reduce(0, +)
+                    segments = outcome.segments.count
+                    modelSummary = outcome.segments.last?.modelSummary ?? opts.baseModel.shortName
+                    tailMs = outcome.tailMs
+                } else {
+                    let r = try await self.pipeline.transcribe(samples, options: opts)
+                    text = r.text
+                    baseText = r.baseText
+                    qwenText = r.qwenText
+                    route = r.route
+                    baseMsElapsed = r.baseMs
+                    qwenMs = r.qwenMs
+                    fuseMs = r.fuseMs
+                    segments = 1
+                    modelSummary = r.modelSummary
+                    tailMs = Int(Date().timeIntervalSince(released) * 1000)
+                }
+
+                let audioFile = Recordings.save(samples, sampleRate: rate, transcript: text)
+                self.hud.hide()
+                guard !text.isEmpty else { return }
+
+                Paster.paste(text, spacing: opts.spacingMode)
+
+                let audioSeconds = Double(samples.count) / rate
+                let entry = HistoryEntry(
+                    text: text,
+                    baseText: baseText,
+                    qwenText: qwenText,
+                    route: route,
+                    durationSeconds: audioSeconds,
+                    tailMs: tailMs,
+                    baseMs: baseMsElapsed,
+                    qwenMs: qwenMs,
+                    fuseMs: fuseMs,
+                    segments: segments,
+                    modelSummary: modelSummary,
+                    audioFilename: audioFile
+                )
+                self.history.append(entry)
+
+                let pasteMs = Int(Date().timeIntervalSince(released) * 1000)
+                log.info("\(audioSeconds, format: .fixed(precision: 1), privacy: .public)s audio → \(pasteMs, privacy: .public)ms to paste; \(segments, privacy: .public) seg(s), \(route, privacy: .public)")
+            } catch {
+                self.hud.hide()
+                log.error("transcription failed: \(error, privacy: .public)")
             }
         }
     }
 
     private func cancelRecording() {
         guard recording else { return }
+        finishTailTask?.cancel()
+        finishTailTask = nil
         _ = recorder.stop()
         let relay = captureRelay
         let liveStart = startLiveTask
