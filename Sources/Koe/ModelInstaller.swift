@@ -2,21 +2,12 @@ import FluidAudio
 import Foundation
 import HuggingFace
 
-/// `Koe --install-models`: downloads and prepares every model up front, so the first launch after
-/// installing is instant. It uses the same code as a normal launch, so the files land where Koe
-/// looks for them. One line per event goes to stdout for install.sh to draw:
-///
-///     model <id> <bytes> <name…>   each model, before any download starts
-///     progress <id> <0…1>          every 150 ms while a model downloads or compiles
-///     done <id>
-///     fail <id> <message…>
+/// `Koe --install-models`: downloads and prepares default models up front so the first launch is fast.
 enum ModelInstaller {
     private struct Model {
         let id: String
         let bytes: Int
         let name: String
-        /// Where the download lands. Some loaders only report progress when a whole file is done,
-        /// so the bytes growing here keep the progress bar moving in between.
         let folders: [URL]
         let install: (Ticker) async throws -> Void
     }
@@ -27,24 +18,38 @@ enum ModelInstaller {
          hub.appendingPathComponent("mlx-audio/" + repo.replacingOccurrences(of: "/", with: "_"))]
     }
 
-    static func run() async -> Int32 {
+    static func run(fuser: FuserModel = .qwen3_1_7b, includeGPU: Bool = true) async -> Int32 {
         setvbuf(stdout, nil, _IOLBF, 0)
-        let models = [
-            Model(id: "bark", bytes: 427_000_000, name: "Parakeet speech model", folders: [fluidAudio("bark-3.0-clean")]) {
-                ticker in try await Transcriber().load(progress: { ticker.update($0) })
+        var models = [
+            Model(id: "parakeet", bytes: 610_000_000, name: "Parakeet Unified 0.6B",
+                  folders: [fluidAudio("parakeet-unified-en-0.6b")]) { ticker in
+                try await Transcriber().load(backend: .parakeetUnifiedStreaming) { ticker.update($0) }
             },
-            Model(id: "vad", bytes: 1_000_000, name: "Pause detection", folders: [fluidAudio("silero-vad")]) {
-                ticker in _ = try await VadManager(progressHandler: { ticker.update($0.fractionCompleted) })
+            Model(id: "vad", bytes: 1_000_000, name: "Pause detection", folders: [fluidAudio("silero-vad")]) { ticker in
+                _ = try await VadManager(progressHandler: { ticker.update($0.fractionCompleted) })
             },
-            Model(id: "qwen", bytes: 684_000_000, name: "Qwen3-ASR speech model",
-                  folders: huggingFace("mlx-community/Qwen3-ASR-0.6B-4bit")) {
-                ticker in try await QwenTranscriber.download(progress: { ticker.update($0) })
-            },
-            Model(id: "gemma", bytes: 4_800_000_000, name: "Gemma 4 language model",
-                  folders: huggingFace("mlx-community/gemma-4-e4b-it-4bit")) {
-                ticker in try await Fuser.download(progress: { ticker.update($0) })
+            Model(id: "ctc", bytes: 106_000_000, name: "Vocabulary spotting",
+                  folders: [fluidAudio("parakeet-ctc-110m-coreml")]) { ticker in
+                _ = try await CtcModels.downloadAndLoad(variant: .ctc110m)
+                ticker.update(1.0)
             },
         ]
+
+        if includeGPU {
+            models.append(
+                Model(id: "qwen", bytes: 684_000_000, name: "Qwen3-ASR speech model",
+                      folders: huggingFace("mlx-community/Qwen3-ASR-0.6B-4bit")) { ticker in
+                    try await QwenTranscriber.download { ticker.update($0) }
+                }
+            )
+            models.append(
+                Model(id: "fuser", bytes: fuser.downloadBytes, name: fuser.displayName,
+                      folders: huggingFace(fuser.repoID)) { ticker in
+                    try await Fuser.download(fuser) { ticker.update($0) }
+                }
+            )
+        }
+
         for model in models { print("model \(model.id) \(model.bytes) \(model.name)") }
 
         var failed = false
@@ -68,9 +73,6 @@ enum ModelInstaller {
             .appendingPathComponent("FluidAudio/Models/\(name)")
     }
 
-    /// Prints one model's latest progress every 150 ms, also while it compiles and reports nothing,
-    /// so the installer's spinner keeps moving. Progress is whichever is further along: what the
-    /// loader reported, or the bytes in the model's folders (held below 100% until it's ready).
     final class Ticker: @unchecked Sendable {
         private let id: String
         private let bytes: Int
@@ -91,7 +93,6 @@ enum ModelInstaller {
         func update(_ value: Double) {
             lock.withLock { fraction = max(fraction, min(value, 1)) }
         }
-
 
         func stop() {
             timer.cancel()

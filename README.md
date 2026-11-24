@@ -2,23 +2,50 @@
 
 # Koe 声
 
-Hold-to-talk dictation for macOS that runs entirely on your Mac. Hold **Right ⌘**, speak, let go — the text is pasted wherever your cursor is.
+Hold-to-talk (or tap-to-toggle / double-tap lock) dictation for macOS that runs 100% on your Mac. Hold **Right ⌘**, speak, let go — the text is pasted wherever your cursor is.
 
-Koe is built for people who dictate technical text: it gets `OIDC`, `kubectl`, `gRPC` and your own project names right, and it never sends audio anywhere.
+Koe is built for technical dictation: it gets jargon (`OIDC`, `kubectl`, `gRPC`), numbers (`PR 2032`, `port 8080`), `.env` filenames, and your own vocabulary right with zero cloud audio.
 
 ## How it works
 
-- **Instant capture.** The mic stays warm for a few minutes after each dictation with a short rolling buffer, so the first word is never lost.
-- **Two recognizers in parallel.** [Parakeet (Bark 3.0 Clean)](https://github.com/FluidInference/FluidAudio) runs on the Neural Engine and [Qwen3-ASR 0.6B](https://github.com/Blaizzy/mlx-audio-swift) on the GPU.
-- **Transcribes while you talk.** Pauses split long dictations into pieces that are transcribed in the background, so letting go only leaves the last few seconds to process.
-- **Fast path when they agree.** Most plain speech is pasted straight away (~150 ms after release). Spelled-out letters and exact jargon spellings are fixed for free first ("J W T" → JWT, "github" → GitHub), so jargon often agrees too.
-- **A small LLM settles disagreements.** [Gemma 4 E4B](https://github.com/ml-explore/mlx-swift-lm) looks only at the sentences where the two recognizers differ, and its answer can only change the words they disagreed on. Words both of them heard are never dropped or rewritten.
-- **Developer and AI vocabulary built in.** Codex, kubectl, nginx, OAuth, Supabase and a couple hundred more, used only where the recognizers disagree, so ordinary sentences are never "corrected" into product names.
-- **Your own words.** Add names and terms, one per line, to `~/Library/Application Support/Koe/vocabulary.txt`. Koe spells these your way even when both recognizers agree on something close ("whisper flow" → "Wispr Flow").
+### Two operating modes
+
+- **Balanced Hybrid (default, ~2.4 GB peak footprint / ~1.8 GB RSS):** Runs [Parakeet Unified 0.6B](https://github.com/FluidInference/FluidAudio) (streaming `int8` RNNT on the Neural Engine) in parallel with [Qwen3-ASR 0.6B](https://github.com/Blaizzy/mlx-audio-swift) (4-bit on GPU). Everyday agreements paste straight away without invoking the LLM; spelled-out acronyms (`"J W T"` → `JWT`), exact jargon casings (`"github"` → `GitHub`, `"next js"` → `Next.js`), hyphenated compounds, and numbers spoken vs written as digits (`"twenty thirty-two"` / `2032`) reconcile deterministically first. Disagreements on technical terms, casing, or punctuation are settled sentence-by-sentence by [Qwen3 1.7B](https://github.com/ml-explore/mlx-swift-lm) (4-bit, non-thinking KV-prefilled prompting with lookup decoding), restricted strictly to the spans where the recognizers differ so agreed words are never dropped or rewritten. After configurable inactivity (default 10 min), GPU models unload automatically back down to ~60 MB and reload on the next key press.
+  - Other selectable fusers in Settings: **Ultra-Light Hybrid** (**Qwen3 0.6B** / **Qwen3.5 0.8B**, ~2.2 GB peak footprint) and **Gemma 4 E2B** / **Gemma 4 E4B**.
+- **ANE Solo (~60 MB RAM, ~30–150 ms latency):** Continuous Neural Engine streaming on **Parakeet Unified 0.6B** with zero GPU memory. Optional **Parakeet CTC 110M** personal-vocabulary boosting (+106 MB on disk, still 0.06 GB peak footprint) biases recognition toward your custom terms. (Also supports **Parakeet Unified 0.6B 15s Batch** and legacy **Bark 3.0 Clean**.)
+
+### Natural punctuation & cleanup
+
+- **No mid-thought truncation:** ANE Solo streams continuously into Parakeet Unified's stateful encoder with zero pause cuts. Hybrid mode uses conservative Silero VAD segmentation (`>= 1.5 s` silence after `>= 10 s` of speech by default, or **Whole Dictation** to disable pause cuts under 30 s) and heals pause seams using syntactic rules plus boundary continuation checks.
+- **Deterministic cleanup:** Repairs intra-word ASR glitches (`"tuning,s"` → `"tunings,"`), drops rogue mid-sentence periods and hesitation commas (`"to. Be"`, `"on device, dictation"`), fixes lowercase after sentence breaks (`". if"` → `". If"`) without mangling dotfiles (`.env`), paths, or dotted tech names (`Next.js`), strips fillers (`um`, `uh`, `erm`) and immediate stutters (`"the the"`), and applies customizable spoken → written **Word Replacements** (`~/Library/Application Support/Koe/replacements.json`, e.g. `"dot env"` → `".env"`).
+- **Built-in & personal vocabulary:** Developer and AI terms are built in and used only where recognizers disagree, so ordinary words aren't rewritten into product names. Add your own terms in `~/Library/Application Support/Koe/vocabulary.txt` (`"whisper flow"` → `"Wispr Flow"`), applied even when both recognizers agree.
+
+## Settings, shortcuts & inspector (`⌘,`)
+
+- **Shortcuts & capture:** Custom shortcut recorder supporting Hold to Talk, Tap to Toggle, or Double-Tap Lock for hands-free dictation, `Esc` to cancel, and **Paste Last Dictation** (`⌥⇧V` by default). Includes a microphone selector and warm-mic pre-roll timer (`Off`, `1`, `3`, or `5` min; 3 min default with 0.3 s rolling pre-roll).
+- **Models & memory:** Live process footprint and MLX GPU memory monitor, manual **Unload GPU** button, 1-click presets, and background model switching with download progress.
+- **Tuning & vocabulary:** Sliders for segment/pause thresholds, cleanup toggles, **Smart Context Spacing** (reads the character before the cursor via Accessibility), a live cleanup preview sandbox, and live-reloading **Personal Vocabulary** and **Word Replacements** editors.
+- **History & Pipeline Diff Inspector:** Searchable local history (`~/Library/Application Support/Koe/history.json`) with route badges (`ane-solo`, `agree`, `fuse`), per-stage latencies, `Base ANE → Final` and `Qwen3-ASR → Final` word diffs, WAV playback (when recording saving is enabled), and 1-click add to vocabulary.
+
+## Benchmarks (v0.5)
+
+Measured across 35 real saved recordings (`bench/eval_recordings.py`, running `Koe --eval` under `/usr/bin/time -l`), counting punctuation/casing anomalies (`intra_word`, `lower_after_period`, `dangling_period`, and `rogue_comma`):
+
+| Stack | Peak footprint | Max RSS | Median wait | p95 wait | Segments | Anomalies |
+|---|---:|---:|---:|---:|---:|---:|
+| v0.4.1 (`Bark ∥ Qwen → Gemma 4 E4B`) | 8.18 GB | — | — | — | — | 15 |
+| **ANE Solo** (Parakeet Unified, no CTC) ¹ | 0.06 GB | 0.10 GB | 29 ms | 47 ms | 35 | 1 |
+| **ANE Solo** (Parakeet Unified + CTC) | 0.06 GB | 0.11 GB | 151 ms | 175 ms | 35 | 1 |
+| **Ultra-Light Hybrid** (`Qwen3 0.6B`) | 2.19 GB | 1.22 GB | 536 ms | 1,069 ms | 41 | 1 |
+| **Qwen3.5 0.8B Hybrid** | 2.24 GB | 1.49 GB | 561 ms | 1,353 ms | 41 | 1 |
+| **Balanced Hybrid** (`Qwen3 1.7B`, default) | 2.39 GB | 1.81 GB | 483 ms | 999 ms | 41 | 1 |
+| **Gemma 4 E2B Hybrid** ¹ | 4.25 GB | 4.28 GB | 2,461 ms | 4,863 ms | 41 | 5 |
+
+Source: `bench/results/eval_final.json` (with ¹ from `bench/results/eval_cached.json`, captured prior to the final dangling-period rule which accounts for 4 of Gemma 4 E2B's 5 anomalies). Across all four stacks in `eval_final.json`, intra-word, lowercase-after-period, and dangling-period anomalies drop to `0` (`1` rogue comma remaining).
 
 ## Accuracy
 
-Word error rate (WER, lower is better): the share of words a transcript gets wrong.
+Word error rate (WER, lower is better): the share of words a transcript gets wrong. The developer dictation and multi-dataset Open ASR Leaderboard benchmarks below were measured on the v0.4 `Bark ∥ Qwen → Gemma 4 E4B` pipeline (`bench/run.sh` reproduces the leaderboard rows).
 
 ### Dictation
 
@@ -91,9 +118,17 @@ Before 2026 the leaderboard used the original transcripts of AMI, Earnings-22, G
 curl -fsSL https://raw.githubusercontent.com/nqrwhal/Koe/main/install.sh | sh
 ```
 
-This installs the latest release into `/Applications` (or `~/Applications`), downloads its speech and language models (about 6 GB, from Hugging Face) and opens it; run it again to update. Then grant **Accessibility** (to see the hotkey and paste) and **Microphone** access when asked.
+This installs the latest release into `/Applications` (or `~/Applications`), downloads about **2.4 GB** of default models (from Hugging Face and FluidAudio), removes quarantine, and opens Koe. Run the same command again to update Koe in place (keeping `/Applications` or `~/Applications` and preserving your settings, vocabulary, and history). Then grant **Accessibility** (to watch the hotkey and paste) and **Microphone** access when asked. (If a shortcut stops responding after updating, toggle Koe off and on in **System Settings → Privacy & Security → Accessibility**.)
 
-Requires an Apple Silicon Mac with macOS 15 or later; 16 GB+ RAM recommended.
+Installer environment variables:
+
+- `KOE_VERSION` — install a specific release tag (e.g. `0.5` or `v0.5`); defaults to latest
+- `KOE_INSTALL_DIR` — install somewhere other than `/Applications` or `~/Applications` (does not launch)
+- `KOE_ANE_ONLY=1` — download only Neural Engine models (~715 MB) and start in **ANE Solo** mode
+- `KOE_SKIP_MODELS=1` — skip model downloads during install (Koe downloads active models on first launch)
+- `KOE_FUSER` — pre-download a different fuser model (`qwen3-0.6b`, `qwen3.5-0.8b`, `qwen3-1.7b`, `gemma4-e2b`, `gemma4-e4b`)
+
+Requires an Apple Silicon Mac with macOS 15 or later: **8 GB+ RAM** for ANE Solo or Ultra-Light Hybrid, **16 GB+ RAM** recommended for Balanced Hybrid.
 
 <details>
 <summary>Or install from the DMG</summary>
@@ -106,8 +141,17 @@ Download `Koe-<version>.dmg` from [Releases](../../releases), open it and drag *
 Requires Xcode with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`).
 
 ```sh
-./build.sh        # builds, installs to ~/Applications/Koe.app and launches it
+./build.sh        # builds, installs to ~/Applications/Koe.app and launches it (--no-launch to skip open)
 ./package.sh      # packages dist/Koe.zip (for install.sh) and dist/Koe-<version>.dmg
 ```
 
-`Koe --eval file.wav …` runs the full pipeline on 16 kHz recordings and prints JSON lines with timings.
+CLI tools on the built binary (`~/Applications/Koe.app/Contents/MacOS/Koe`):
+
+```sh
+Koe --self-test   # deterministic checks for TextCleaner, Disagreements, Vocabulary, KeyBinding, Paster, HistoryStore
+Koe --eval [--mode ane-solo|hybrid] [--base unified-stream|unified-batch|bark] \
+    [--fuser qwen3-0.6b|qwen3.5-0.8b|qwen3-1.7b|gemma4-e2b|gemma4-e4b] \
+    [--no-ctc] [--whole] [--no-clean] file.wav …
+```
+
+`Koe --eval` runs the pipeline on 16 kHz recordings and prints JSON lines with transcripts, routes, timings, and memory footprint (`bench/eval_recordings.py` reproduces the v0.5 stack evaluation; `bench/run.sh` reproduces the v0.4 Open ASR Leaderboard rows).

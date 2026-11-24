@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 
 /// Terms Koe should spell right, from two lists:
 /// - **yours**, in ~/Library/Application Support/Koe/vocabulary.txt. Koe checks for these even when
@@ -51,7 +55,18 @@ enum Vocabulary {
         return parse((try? String(contentsOf: url, encoding: .utf8)) ?? personalTemplate)
     }
 
-    private static func parse(_ text: String) -> [String] {
+    static func savePersonal(_ terms: [String]) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let cleaned = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let body = """
+            # Your own words and names, one per line (or comma-separated).
+            # Koe spells these your way even when both recognizers agree on something close,
+            # e.g. "whisper flow" becomes "Wispr Flow". Developer and AI tooling is built in.
+            """ + "\n" + cleaned.joined(separator: "\n") + "\n"
+        try? body.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    static func parse(_ text: String) -> [String] {
         text.split(separator: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }
             .flatMap { $0.split(separator: ",") }
@@ -118,7 +133,7 @@ enum Vocabulary {
     }
 
     /// 1 − normalized edit distance.
-    private static func similarity(_ a: String, _ b: String) -> Double {
+    static func similarity(_ a: String, _ b: String) -> Double {
         let a = Array(a), b = Array(b)
         var row = Array(0...b.count)
         for i in 1...max(a.count, 1) where !a.isEmpty {
@@ -138,30 +153,54 @@ enum Vocabulary {
 /// needs no LLM, and the recognizers agree more often, which keeps dictations on the fast path:
 /// - spelled-out letters become an acronym: "J W T" → "JWT", "m. c. p." → "MCP";
 /// - words whose letters exactly match a term with its own casing take that spelling:
-///   "github" → "GitHub", "grpc" → "gRPC", "next js" → "Next.js".
-/// Terms that are also ordinary English words ("REST", "RAG") are never applied this way, and a
-/// match must have as many words as the term, so "I am" can never become "IAM".
+///   "github" → "GitHub", "grpc" → "gRPC", "next js" → "Next.js";
+/// - high-confidence matches against the user's personal vocabulary ("whisper flow" → "Wispr Flow")
+///   are fixed deterministically even in ANE-only mode.
 struct Speller {
     private var spellings: [String: (term: String, words: Set<Int>)] = [:]  // keyed by letters
+    private let personalRules: [(term: String, letters: String, wordCount: Int, allowSingleEnglish: Bool)]
 
     /// Call on the main thread (it consults the system spell checker).
-    init(terms: [String]) {
+    init(terms: [String], personal: [String] = []) {
+        #if os(macOS)
         let checker = NSSpellChecker.shared
+        #else
+        let checker = UITextChecker()
+        #endif
+        func isEnglishWord(_ word: String) -> Bool {
+            #if os(macOS)
+            return checker.checkSpelling(of: word, startingAt: 0, language: "en", wrap: false,
+                                         inSpellDocumentWithTag: 0, wordCount: nil).location == NSNotFound
+            #else
+            return checker.rangeOfMisspelledWord(
+                in: word, range: NSRange(location: 0, length: word.utf16.count),
+                startingAt: 0, wrap: false, language: "en").location == NSNotFound
+            #endif
+        }
+
         for term in terms {
             let letters = Vocabulary.letters(term)
             guard letters.count >= 3, term != term.lowercased(), term != term.capitalized,
                   spellings[letters] == nil else { continue }
-            let misspelled = checker.checkSpelling(of: letters, startingAt: 0, language: "en", wrap: false,
-                                                   inSpellDocumentWithTag: 0, wordCount: nil)
-            guard misspelled.location != NSNotFound else { continue }
+            guard !isEnglishWord(letters) else { continue }
             let count = term.split(separator: " ").count
             // "Next.js" and "CI/CD" are spoken as two words ("next js", "ci cd").
             spellings[letters] = (term, term.contains(where: { $0 == "." || $0 == "/" }) ? [count, count + 1] : [count])
         }
+
+        var rules: [(term: String, letters: String, wordCount: Int, allowSingleEnglish: Bool)] = []
+        for term in personal {
+            let letters = Vocabulary.letters(term)
+            guard letters.count >= 2 else { continue }
+            let wordCount = max(1, term.split(separator: " ").count)
+            let allowSingleEnglish = !isEnglishWord(letters) || term != term.lowercased() && term != term.capitalized
+            rules.append((term: term, letters: letters, wordCount: wordCount, allowSingleEnglish: allowSingleEnglish))
+        }
+        self.personalRules = rules
     }
 
     func normalize(_ text: String) -> String {
-        let words = Self.joiningSpelledLetters(text.split(separator: " ").map(String.init))
+        var words = Self.joiningSpelledLetters(text.split(whereSeparator: \.isWhitespace).map(String.init))
         var out: [String] = []
         var i = 0
         next: while i < words.count {
@@ -179,7 +218,37 @@ struct Speller {
             out.append(words[i])
             i += 1
         }
-        return out.joined(separator: " ")
+        words = out
+
+        // Apply personal vocabulary deterministic fixes (exact or >= 0.80 similarity for >= 6-char terms).
+        guard !personalRules.isEmpty else { return words.joined(separator: " ") }
+        var pOut: [String] = []
+        var j = 0
+        nextPersonal: while j < words.count {
+            for rule in personalRules {
+                let sizes = Array(Set([rule.wordCount, max(1, rule.wordCount - 1), rule.wordCount + 1])).sorted(by: >)
+                for size in sizes where j + size <= words.count {
+                    let window = words[j..<j + size]
+                    if window.dropLast().contains(where: { $0.last.map(Self.isPunctuation) ?? false }) { continue }
+                    let candidate = Vocabulary.letters(window.joined())
+                    guard !candidate.isEmpty else { continue }
+                    let exact = (candidate == rule.letters) && (size > 1 || rule.allowSingleEnglish || window.joined().lowercased().filter(\.isLetter) == rule.letters)
+                    let fuzzy = rule.letters.count >= 6 && abs(candidate.count - rule.letters.count) <= 3
+                        && Vocabulary.similarity(candidate, rule.letters) >= 0.80
+                        && (size > 1 || rule.allowSingleEnglish)
+                    if exact || fuzzy {
+                        let leading = String(window.first!.prefix(while: Self.isPunctuation))
+                        let trailing = String(window.last!.reversed().prefix(while: Self.isPunctuation).reversed())
+                        pOut.append(leading + rule.term + trailing)
+                        j += size
+                        continue nextPersonal
+                    }
+                }
+            }
+            pOut.append(words[j])
+            j += 1
+        }
+        return pOut.joined(separator: " ")
     }
 
     /// Runs of two or more single letters ("J W T", "o. a. u. t. h.") are spelled-out acronyms.

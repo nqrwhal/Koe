@@ -3,11 +3,20 @@
 #   curl -fsSL https://raw.githubusercontent.com/nqrwhal/Koe/main/install.sh | sh
 #
 #   KOE_INSTALL_DIR=…   install somewhere other than /Applications (or ~/Applications); doesn't launch
+#   KOE_VERSION=…       install a specific release tag (e.g. 0.5 or v0.5); defaults to latest
+#   KOE_ANE_ONLY=1      download only Neural Engine models (~715 MB) and use ANE Solo mode
 #   KOE_SKIP_MODELS=1   skip the models now; Koe downloads them the first time it opens
 #   KOE_ZIP_URL=…       install from another Koe.zip (for testing a build)
 set -eu
 
-url="${KOE_ZIP_URL:-https://github.com/nqrwhal/Koe/releases/latest/download/Koe.zip}"
+if [ -n "${KOE_ZIP_URL:-}" ]; then
+    url="$KOE_ZIP_URL"
+elif [ -n "${KOE_VERSION:-}" ]; then
+    case "$KOE_VERSION" in v*) tag="$KOE_VERSION" ;; *) tag="v$KOE_VERSION" ;; esac
+    url="https://github.com/nqrwhal/Koe/releases/download/$tag/Koe.zip"
+else
+    url="https://github.com/nqrwhal/Koe/releases/latest/download/Koe.zip"
+fi
 
 # ── Look ────────────────────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -82,8 +91,17 @@ macos=$(sw_vers -productVersion)
 chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
 ok "$chip · macOS $macos"
 
-dir="${KOE_INSTALL_DIR:-/Applications}"
-if [ -z "${KOE_INSTALL_DIR:-}" ] && [ ! -w /Applications ]; then dir="$HOME/Applications"; fi
+if [ -n "${KOE_INSTALL_DIR:-}" ]; then
+    dir="$KOE_INSTALL_DIR"
+elif [ -d "/Applications/Koe.app" ] && [ -w /Applications ]; then
+    dir="/Applications"
+elif [ -d "$HOME/Applications/Koe.app" ]; then
+    dir="$HOME/Applications"
+elif [ -w /Applications ]; then
+    dir="/Applications"
+else
+    dir="$HOME/Applications"
+fi
 mkdir -p "$dir"
 previous=""
 if [ -f "$dir/Koe.app/Contents/Info.plist" ]; then
@@ -91,7 +109,7 @@ if [ -f "$dir/Koe.app/Contents/Info.plist" ]; then
 fi
 
 # ── Download the app ────────────────────────────────────────────────────────────────────
-total=$(curl -fsSIL "$url" | awk 'tolower($1) == "content-length:" { n = $2 } END { gsub(/\r/, "", n); print n + 0 }')
+total=$( { curl -fsSIL "$url" 2>/dev/null || true; } | awk 'tolower($1) == "content-length:" { n = $2 } END { gsub(/\r/, "", n); print n + 0 }')
 curl -fsSL "$url" -o "$tmp/Koe.zip" &
 pid=$!
 if [ "$tty" = 1 ]; then
@@ -112,23 +130,45 @@ ditto -x -k "$tmp/Koe.zip" "$tmp"
 version=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$tmp/Koe.app/Contents/Info.plist")
 ok "Downloaded Koe $version ($(size "$(stat -f%z "$tmp/Koe.zip")"))"
 
-pkill -x Koe 2>/dev/null || true
+if pgrep -x Koe >/dev/null 2>&1; then
+    pkill -x Koe 2>/dev/null || true
+    i=0
+    while pgrep -x Koe >/dev/null 2>&1 && [ "$i" -lt 20 ]; do
+        sleep 0.1
+        i=$((i + 1))
+    done
+    pkill -9 -x Koe 2>/dev/null || true
+fi
 rm -rf "$dir/Koe.app"
 mv "$tmp/Koe.app" "$dir/Koe.app"
+xattr -dr com.apple.quarantine "$dir/Koe.app" 2>/dev/null || true
 if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
     ok "Updated $dir/Koe.app from $previous to $version"
+elif [ "$previous" = "$version" ]; then
+    ok "Reinstalled $dir/Koe.app ($version)"
 else
-    ok "Installed $dir/Koe.app"
+    ok "Installed $dir/Koe.app ($version)"
 fi
 
 # ── Download the models ─────────────────────────────────────────────────────────────────
 # Releases before 0.3 can't do this; they download their models on first launch instead.
 case "$version" in 0.1 | 0.1.* | 0.2 | 0.2.*) KOE_SKIP_MODELS=1 ;; esac
 if [ "${KOE_SKIP_MODELS:-}" != 1 ]; then
+    set -- --install-models
+    if [ "${KOE_ANE_ONLY:-}" = 1 ]; then
+        set -- "$@" --ane-only
+        model_note="about 715 MB (ANE Solo), downloaded once and kept on this Mac"
+        defaults write com.yufei.koe koe.engineMode -string ane-solo
+    else
+        model_note="about 2.4 GB, downloaded once and kept on this Mac"
+        if [ -n "${KOE_FUSER:-}" ]; then
+            set -- "$@" --fuser "$KOE_FUSER"
+        fi
+    fi
     say ""
-    say "  ${text}Models${reset} ${quiet}· about 5.9 GB, downloaded once and kept on this Mac${reset}"
+    say "  ${text}Models${reset} ${quiet}· $model_note${reset}"
     : > "$tmp/failed"
-    "$dir/Koe.app/Contents/MacOS/Koe" --install-models 2>/dev/null </dev/null | {
+    "$dir/Koe.app/Contents/MacOS/Koe" "$@" 2>/dev/null </dev/null | {
         set +e  # the checks below are expected to be false most of the time
         ids="" rows=0 tick=0
         draw() {
@@ -179,6 +219,9 @@ else
 fi
 say ""
 say "  ${quiet}1.${reset} ${text}Allow Accessibility and Microphone access when macOS asks.${reset}"
-say "  ${quiet}2.${reset} ${text}Hold ${bold}Right ⌘${reset}${text}, speak, and let go. The text appears where your cursor is.${reset}"
-say "  ${quiet}3.${reset} ${text}Add your own names and terms to ${reset}${quiet}~/Library/Application Support/Koe/vocabulary.txt${reset}"
+say "  ${quiet}2.${reset} ${text}Hold ${bold}Right ⌘${reset}${text}, speak, and let go — or open ${reset}${quiet}声 → Settings… (⌘,)${reset}${text} to customize shortcuts, models/RAM, and history.${reset}"
+say "  ${quiet}3.${reset} ${text}Add names and word replacements in ${reset}${quiet}Settings… → Vocabulary${reset}${text} (or ${reset}${quiet}~/Library/Application Support/Koe/vocabulary.txt${reset}${text}).${reset}"
+if [ -n "$previous" ] && [ "$previous" != "$version" ]; then
+    say "  ${quiet}Note:${reset} ${quiet}If your shortcut doesn't respond after updating, toggle Koe off and on in System Settings → Privacy & Security → Accessibility.${reset}"
+fi
 say ""

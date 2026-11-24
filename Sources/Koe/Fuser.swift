@@ -6,43 +6,60 @@ import MLXLLM
 import MLXLMCommon
 import Tokenizers
 
-/// Gemma 4 E4B reconciles Bark's and Qwen's transcripts of the same audio into one.
+/// Small on-device LLM that reconciles base ANE and Qwen3-ASR transcripts of the same audio
+/// only where they disagree, and resolves pause seams.
 ///
-/// Two speedups keep this around a few hundred milliseconds:
+/// Two speedups keep this fast:
 /// - the fixed instructions are prefilled once at load and their KV cache is copied per request;
-/// - lookup decoding: the answer is usually Qwen's cleaned text with a few words changed, so
-///   upcoming tokens are drafted from that text and verified in a single forward pass
-///   (same result as plain greedy decoding).
+/// - lookup decoding (when KV cache supports trimming): upcoming tokens are drafted from Qwen's
+///   reading and verified in a single forward pass.
 actor Fuser {
     private var context: ModelContext?
+    private var activeModel: FuserModel?
     private var prefixCache: [KVCache] = []
     private var seamCache: [KVCache] = []
     private var yesTokens: [Int] = []
     private var noTokens: [Int] = []
-    private let seamMargin: Float = 1  // calibrated on real seams: true continuations scored +1.4 and +6.3
     private var stopTokens: Set<Int> = []
     private var canTrim = false
 
-    private static let configuration = ModelConfiguration(id: "mlx-community/gemma-4-e4b-it-4bit")
+    static let defaultCacheLimitBytes = 32 * 1024 * 1024
 
-    /// Downloads the model into the cache `load()` reads from, reporting progress (for the installer).
-    static func download(progress: @escaping @Sendable (Double) -> Void) async throws {
+    var currentModel: FuserModel? { activeModel }
+    var isLoaded: Bool { context != nil }
+
+    static func download(_ model: FuserModel = .qwen3_1_7b, progress: @escaping @Sendable (Double) -> Void) async throws {
+        let config = ModelConfiguration(id: model.repoID)
         _ = try await LLMModelFactory.shared.load(
-            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: configuration,
+            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: config,
             progressHandler: { progress($0.fractionCompleted) })
     }
 
-    func load() async throws {
+    func load(_ model: FuserModel = .qwen3_1_7b, progress: (@Sendable (Double) -> Void)? = nil) async throws {
+        if activeModel == model && context != nil { return }
+        unload()
+
+        MLX.Memory.cacheLimit = Self.defaultCacheLimitBytes
+        let config = ModelConfiguration(id: model.repoID)
         let context = try await LLMModelFactory.shared.load(
-            from: #hubDownloader(), using: #huggingFaceTokenizerLoader(), configuration: Self.configuration)
+            from: #hubDownloader(),
+            using: #huggingFaceTokenizerLoader(),
+            configuration: config,
+            progressHandler: { p in progress?(p.fractionCompleted) }
+        )
         let tokenizer = context.tokenizer
-        stopTokens = Set([tokenizer.eosTokenId, tokenizer.convertTokenToId("<turn|>")].compactMap { $0 })
+
+        let stopCandidates: [String] = switch model.family {
+        case .gemma4: ["<turn|>", "<eos>"]
+        case .qwen3, .qwen35: ["<|im_end|>", "<|endoftext|>"]
+        }
+        stopTokens = Set(([tokenizer.eosTokenId] + stopCandidates.map { tokenizer.convertTokenToId($0) }).compactMap { $0 })
 
         let instructions = """
             Two different speech recognizers transcribed the same dictation by a software engineer.
             Write the single most likely correct transcript. Where they disagree, pick the reading that makes sense; \
             where both are wrong about a technical term, fix its spelling and casing (e.g. "J W T" -> "JWT", "cube cuddle" -> "kubectl").
-            Never add content that neither transcript supports. Keep punctuation.
+            Fix obvious intra-word punctuation glitches (e.g. "tuning,s" -> "tunings"). Never add content that neither transcript supports. Keep clean punctuation.
             Vocabulary — whenever the speaker plausibly said one of the listed terms, use exactly its spelling, \
             even if both transcripts spell it differently (e.g. "whisper flow" -> "Wispr Flow"). \
             Don't use a term the transcripts don't sound like.
@@ -50,7 +67,13 @@ actor Fuser {
 
 
             """
-        let prefix = tokenizer.encode(text: "<bos><|turn>user\n" + instructions, addSpecialTokens: false)
+
+        let userTurnPrefix = switch model.family {
+        case .gemma4: "<bos><|turn>user\n"
+        case .qwen3, .qwen35: "<|im_start|>user\n"
+        }
+
+        let prefix = tokenizer.encode(text: userTurnPrefix + instructions, addSpecialTokens: false)
         let cache = try context.model.newCache(parameters: nil)
         eval(context.model(MLXArray(prefix.map(Int32.init)).reshaped([1, prefix.count]), cache: cache))
         prefixCache = cache
@@ -63,24 +86,57 @@ actor Fuser {
 
 
             """
-        yesTokens = ["yes", "Yes", "YES"].compactMap { tokenizer.convertTokenToId($0) }
-        noTokens = ["no", "No", "NO"].compactMap { tokenizer.convertTokenToId($0) }
-        let seamPrefix = tokenizer.encode(text: "<bos><|turn>user\n" + seamQuestion, addSpecialTokens: false)
+
+        yesTokens = Array(Set(
+            ["yes", "Yes", "YES"].compactMap { tokenizer.convertTokenToId($0) }
+            + ["yes", "Yes"].compactMap { tokenizer.encode(text: $0, addSpecialTokens: false).first }
+        ))
+        noTokens = Array(Set(
+            ["no", "No", "NO"].compactMap { tokenizer.convertTokenToId($0) }
+            + ["no", "No"].compactMap { tokenizer.encode(text: $0, addSpecialTokens: false).first }
+        ))
+
+        let seamPrefix = tokenizer.encode(text: userTurnPrefix + seamQuestion, addSpecialTokens: false)
         seamCache = try context.model.newCache(parameters: nil)
         eval(context.model(MLXArray(seamPrefix.map(Int32.init)).reshaped([1, seamPrefix.count]), cache: seamCache))
+
         self.context = context
-        _ = fuse("ok", "ok", draft: "ok", context: nil, vocabulary: [])  // compile kernels before the first real request
+        self.activeModel = model
+        _ = fuse("ok", "ok", draft: "ok", context: nil, vocabulary: [])  // compile Metal kernels
+        MLX.Memory.clearCache()
     }
 
-    /// Nil until the model has loaded. `draft` is the text the answer most likely resembles;
-    /// `context` is the already-final text just before this piece of a longer dictation;
-    /// `vocabulary` the terms that might appear in it (see ``Vocabulary/relevant(to:terms:limit:)``).
+    func unload() {
+        context = nil
+        activeModel = nil
+        prefixCache = []
+        seamCache = []
+        yesTokens = []
+        noTokens = []
+        stopTokens = []
+        canTrim = false
+        MLX.Memory.clearCache()
+    }
+
+    private func replySuffix(for family: FuserModel.Family) -> String {
+        switch family {
+        case .gemma4:
+            // Close Gemma 4's non-thinking reasoning channel so token 0 is the direct answer.
+            return "<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+        case .qwen3, .qwen35:
+            // Disable Qwen3 / Qwen3.5 thinking mode so fusion runs without <think> latency.
+            return "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        }
+    }
+
+    /// Nil until the model has loaded.
     func fuse(_ a: String, _ b: String, draft: String, context preceding: String?, vocabulary: [String]) -> String? {
-        guard let context else { return nil }
+        guard let context, let activeModel else { return nil }
         let tokenizer = context.tokenizer
         var lead = preceding.map { "Earlier in this dictation (context only): \($0)\n" } ?? ""
         if !vocabulary.isEmpty { lead += "Vocabulary: \(vocabulary.joined(separator: ", "))\n" }
-        let prompt = tokenizer.encode(text: lead + "A: \(a)\nB: \(b)<turn|>\n<|turn>model\n", addSpecialTokens: false)
+        let requestText = lead + "A: \(a)\nB: \(b)" + replySuffix(for: activeModel.family)
+        let prompt = tokenizer.encode(text: requestText, addSpecialTokens: false)
         let draftSource = canTrim ? tokenizer.encode(text: draft, addSpecialTokens: false) : []
         let cache = prefixCache.map { $0.copy() }
 
@@ -99,24 +155,27 @@ actor Fuser {
             }
             next = predictions[accepted]
         }
-        return tokenizer.decode(tokenIds: output, skipSpecialTokens: true)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let decoded = tokenizer.decode(tokenIds: output, skipSpecialTokens: true)
+        return TextCleaner.stripReasoningArtifacts(decoded)
     }
 
     /// Whether `next` continues the same sentence as `previous`; nil until the model has loaded.
-    func continues(_ previous: String, _ next: String) -> Bool? {
-        guard let context else { return nil }
-        let end = previous.split(separator: " ").suffix(15).joined(separator: " ")
-        let start = next.split(separator: " ").prefix(10).joined(separator: " ")
-        let prompt = context.tokenizer.encode(
-            text: "End of part 1: \"…\(end)\"\nStart of part 2: \"\(start)…\"<turn|>\n<|turn>model\n",
-            addSpecialTokens: false)
-        // Gemma leans towards "yes" when unsure, so require a clear margin over "no".
+    func continues(_ previous: String, _ next: String, relaxed: Bool = false) -> Bool? {
+        guard let context, let activeModel else { return nil }
+        let end = previous.split(whereSeparator: \.isWhitespace).suffix(15).joined(separator: " ")
+        let start = next.split(whereSeparator: \.isWhitespace).prefix(10).joined(separator: " ")
+        let promptText = "End of part 1: \"…\(end)\"\nStart of part 2: \"\(start)…\"" + replySuffix(for: activeModel.family)
+        let prompt = context.tokenizer.encode(text: promptText, addSpecialTokens: false)
         let logits = forward(prompt, seamCache.map { $0.copy() })[0, -1]
-        let yes = yesTokens.map { logits[$0].item(Float.self) }.max() ?? 0
-        let no = noTokens.map { logits[$0].item(Float.self) }.max() ?? 0
-        log.info("seam margin \(yes - no, privacy: .public): …\(end, privacy: .private) | \(start, privacy: .private)…")
-        return yes - no > seamMargin
+        let yes = yesTokens.map { logits[$0].item(Float.self) }.max() ?? -Float.infinity
+        let no = noTokens.map { logits[$0].item(Float.self) }.max() ?? -Float.infinity
+        let margin = yes - no
+        let threshold: Float = switch activeModel.family {
+        case .gemma4: relaxed ? -0.5 : 0.5
+        case .qwen3, .qwen35: relaxed ? -0.5 : 0.0
+        }
+        log.info("seam margin \(margin, privacy: .public) (threshold \(threshold, privacy: .public)): …\(end, privacy: .private) | \(start, privacy: .private)…")
+        return margin > threshold
     }
 
     private func forward(_ tokens: [Int], _ cache: [KVCache]) -> MLXArray {
